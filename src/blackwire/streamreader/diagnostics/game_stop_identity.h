@@ -2,7 +2,7 @@
 #define BW_GAME_STOP_IDENTITY_H
 #include <stddef.h>
 #include <stdint.h>
-#define BW_STOP_PROFILE_FW UINT32_C(0x13000040)
+#define BW_STOP_PROFILE_FW UINT32_C(0x08000044)
 #define BW_STOP_PROFILE_RECORD 1096u
 #define BW_STOP_PROFILE_MAX_AGE_US INT64_C(60000000)
 struct bw_stop_identity { int32_t pid; int64_t start_sec,start_usec; char role[20]; };

@@ -532,20 +532,27 @@ int bw_nrc_remote_prepare_sources(void *opaque,const struct bw_nrc_subject *subj
     struct bw_sm_reply version={0};struct bw_sm_document games[2]={{0}},manual[2]={{0}};int result=-1,expected=-1;
     struct status_snapshot status={0};
     r->reason="cleanup_remote_capability_unknown";
+    bw_send_log("prepare-source-phase","phase=version");
     if(current(r)||bw_sm_post(&r->connection,BW_SM_VERSION,"/",&version))goto done;
     for(unsigned i=0;i<2;i++){
         r->reason="cleanup_remote_observation_unknown";
-        if(confirmed_twice(r,subject,witness,proof,&expected)||
-           bw_sm_observe(&r->connection,BW_SM_OBSERVE_GAMES,games+i)||bw_sm_observe(&r->connection,BW_SM_OBSERVE_MANUAL_PATHS,manual+i)||
-           documents(r,subject,games[i].bytes,games[i].size,manual[i].bytes,manual[i].size,expected?NRC_PREPARE_REGISTERED:NRC_PREPARE_ABSENT,&status)||
-           confirmed_twice(r,subject,witness,proof,&expected))goto done;
+        bw_send_log("prepare-source-phase","phase=witness_pre iter=%u",i);
+        if(confirmed_twice(r,subject,witness,proof,&expected))goto done;
+        bw_send_log("prepare-source-phase","phase=observe iter=%u",i);
+        if(bw_sm_observe(&r->connection,BW_SM_OBSERVE_GAMES,games+i)||bw_sm_observe(&r->connection,BW_SM_OBSERVE_MANUAL_PATHS,manual+i))goto done;
+        bw_send_log("prepare-source-phase","phase=documents iter=%u games=%zu manual=%zu",i,games[i].size,manual[i].size);
+        if(documents(r,subject,games[i].bytes,games[i].size,manual[i].bytes,manual[i].size,expected?NRC_PREPARE_REGISTERED:NRC_PREPARE_ABSENT,&status))goto done;
+        bw_send_log("prepare-source-phase","phase=witness_post iter=%u",i);
+        if(confirmed_twice(r,subject,witness,proof,&expected))goto done;
     }
+    bw_send_log("prepare-source-phase","phase=snapshot_compare");
     if(games[0].size!=games[1].size||manual[0].size!=manual[1].size||memcmp(games[0].bytes,games[1].bytes,games[0].size)||
        memcmp(manual[0].bytes,manual[1].bytes,manual[0].size)||current(r)){fail(r,"cleanup_remote_snapshot_changed");goto done;}
     r->reason="cleanup_prepare_sources_observed_not_destructive_proof";result=0;
 done:
     if(result)bw_send_log("prepare-source-failure","policy=prepare-only reason=%s row=%u missing=%u unknown_rows=%u unknown_paths=%u substage=%s class=%s errno=%d",
         r->reason?r->reason:"",r->row_index,r->missing_fields,r->unknown_game_rows,r->unknown_manual_paths,r->substage?r->substage:"",r->path_class?r->path_class:"",r->observation_error);
+    else bw_send_log("prepare-source-phase","phase=done");
     for(unsigned i=0;i<2;i++){bw_sm_document_clear(games+i);bw_sm_document_clear(manual+i);}return result;
 }
 

@@ -278,9 +278,12 @@ static int home_prepare_lease(void *opaque){
 }
 static int home_prepare_control(void *opaque){
     struct home_prepare *h=opaque;
-    if(home_prepare_lease(h)||prepare_current(h->p)||prepare_authority(h->p,BW_PREPARE_CONTROL))return -1;
-    if(h->startup&&bw_native_launch_admission_current(h->startup,backend_data_root,&h->identity,&h->selection,NULL)){h->startup_invalid=1;return -1;}
-    return home_prepare_lease(h)?-1:0;
+    if(home_prepare_lease(h)){bw_send_log("guard-detail","check=lease result=failed");return -1;}
+    if(prepare_current(h->p)){bw_send_log("guard-detail","check=prepare_current result=failed");return -1;}
+    if(prepare_authority(h->p,BW_PREPARE_CONTROL)){bw_send_log("guard-detail","check=prepare_authority result=failed");return -1;}
+    if(h->startup&&bw_native_launch_admission_current(h->startup,backend_data_root,&h->identity,&h->selection,NULL)){h->startup_invalid=1;bw_send_log("guard-detail","check=admission_current result=failed");return -1;}
+    if(home_prepare_lease(h)){bw_send_log("guard-detail","check=lease_final result=failed");return -1;}
+    return 0;
 }
 static int home_prepare_registration(void *opaque,enum bw_nrl_control point){return point==BW_NRL_REGISTER?home_prepare_control(opaque):-1;}
 struct home_prepare_failure {unsigned step;const char *where,*detail;int raw,error;};

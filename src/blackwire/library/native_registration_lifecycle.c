@@ -14,6 +14,7 @@
 #include "../streamreader/copy_sha256.h"
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define NRL_ROOT_LIMIT 256u
 #define NRL_DEPTH_LIMIT 64u
@@ -31,13 +32,22 @@ struct bw_nrl_owner {
     unsigned manual_requested,runtime_release_done;
     struct nrl_witness *witness;
     const char *failure;
+    double projection_checked_at;
 };
+static double nrl_monotonic(void){struct timespec t;if(clock_gettime(CLOCK_MONOTONIC,&t))return -1;return (double)t.tv_sec+(double)t.tv_nsec/1e9;}
 static int nrl_current(void *opaque){
-    struct bw_nrl_owner *p=opaque;
-    int bad=!p||!p->request.current||p->request.current(p->request.opaque,p->phase);
-    if(!bad&&p->phase==BW_NRL_REGISTER&&p->selection.prepared_policy==3)
-        bad=bw_nrc_projection_execution_current(p->request.startup,p->request.environment.data_root,&p->selection);
-    if(bad&&p&&!p->failure)p->failure="registration_control_guard_refused";return bad?-1:0;
+    struct bw_nrl_owner *p=opaque;if(!p)return -1;
+    if(!p->request.current){if(!p->failure)p->failure="registration_control_guard_no_callback";return -1;}
+    int outer=p->request.current(p->request.opaque,p->phase);
+    if(outer){if(!p->failure)p->failure="registration_control_guard_outer_refused";return -1;}
+    if(p->phase==BW_NRL_REGISTER&&p->selection.prepared_policy==3){
+        double t=nrl_monotonic();
+        if(t>=0&&p->projection_checked_at>0&&t-p->projection_checked_at<10.0)return 0;
+        int proj=bw_nrc_projection_execution_current(p->request.startup,p->request.environment.data_root,&p->selection);
+        if(proj){if(!p->failure)p->failure="registration_control_guard_projection_refused";return -1;}
+        p->projection_checked_at=t;
+    }
+    return 0;
 }
 static int nrl_path(const char *path){
     if(!path||path[0]!='/'||strnlen(path,BW_NRC_PATH_BYTES)>=BW_NRC_PATH_BYTES)return -1;

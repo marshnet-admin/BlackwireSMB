@@ -13,6 +13,7 @@
 #include "registration_param_compat.h"
 #include "../streamreader/copy_sha256.h"
 #include "../streamreader/copy_fs.h"
+#include "send_diagnostic.h"
 #include <pthread.h>
 #include <dirent.h>
 
@@ -122,8 +123,15 @@ static int projection_identity(const struct bw_reader_selection *s,struct bw_pro
 }
 int bw_nrc_projection_execution_current(struct bw_native_launch_admission *startup,const char *base,const struct bw_reader_selection *s){
     struct bw_provider_binding identity;struct bw_native_prepared prepared={0};const struct bw_preload_companions *companions=NULL;
-    return !startup||!base||projection_identity(s,&identity)||bw_native_launch_admission_current(startup,base,&identity,s,&prepared)||
-        prepared.state!=BW_PREPARED_VALID||prepared.prepared_policy!=3||bw_native_launch_admission_companions(startup,&companions)||!companions?-1:0;
+    if(!startup){bw_send_log("projection-guard","check=startup result=null");return -1;}
+    if(!base){bw_send_log("projection-guard","check=base result=null");return -1;}
+    if(projection_identity(s,&identity)){bw_send_log("projection-guard","check=projection_identity result=failed");return -1;}
+    if(bw_native_launch_admission_current(startup,base,&identity,s,&prepared)){bw_send_log("projection-guard","check=admission_current result=failed");return -1;}
+    if(prepared.state!=BW_PREPARED_VALID){bw_send_log("projection-guard","check=prepared_state result=invalid state=%d",prepared.state);return -1;}
+    if(prepared.prepared_policy!=3){bw_send_log("projection-guard","check=prepared_policy result=mismatch policy=%u",prepared.prepared_policy);return -1;}
+    if(bw_native_launch_admission_companions(startup,&companions)){bw_send_log("projection-guard","check=companions result=failed");return -1;}
+    if(!companions){bw_send_log("projection-guard","check=companions result=null");return -1;}
+    return 0;
 }
 static int projection_current(void *opaque){struct context *c=opaque;return !c||c->release_unknown||!c->projection_guard||c->projection_guard(c->projection_opaque)||anchors_current(c)?-1:0;}
 static int projection_capture(struct context *c,const struct bw_reader_selection *s){
