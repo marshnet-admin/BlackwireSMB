@@ -3,6 +3,7 @@
 #endif
 #include "native_registration.h"
 #include "media_public_trial.h"
+#include "send_diagnostic.h"
 #include <sqlite3.h>
 #include <errno.h>
 #include <limits.h>
@@ -128,24 +129,31 @@ int bw_registration_db_titles(const char *path,struct bw_registration_titles *ou
     if(!path||!out)return -1;memset(out,0,sizeof *out);
     char canonical[PATH_MAX];struct stat before,after;
     if(!realpath(path,canonical)||strcmp(path,canonical)||lstat(path,&before)||!S_ISREG(before.st_mode)||before.st_nlink!=1||
-       before.st_size<=0||before.st_size>128*1024*1024)return -1;
-    pthread_once(&ro_once,ro_initialize);if(!ro_ready)return -1;
+       before.st_size<=0||before.st_size>128*1024*1024){bw_send_log("media-db-refused","stage=file errno=%d",errno);return -1;}
+    pthread_once(&ro_once,ro_initialize);if(!ro_ready){bw_send_log("media-db-refused","stage=vfs");return -1;}
     sqlite3 *db=NULL;sqlite3_stmt *stmt=NULL;int result=-1;unsigned steps=0;
     if(sqlite3_open_v2(path,&db,SQLITE_OPEN_READONLY|SQLITE_OPEN_NOMUTEX|SQLITE_OPEN_NOFOLLOW,"blackwire-readonly")!=SQLITE_OK||
-       sqlite3_db_readonly(db,"main")!=1)goto done;
+       sqlite3_db_readonly(db,"main")!=1){bw_send_log("media-db-refused","stage=open error=%s",db?sqlite3_errmsg(db):"none");goto done;}
     sqlite3_limit(db,SQLITE_LIMIT_LENGTH,1024*1024);sqlite3_limit(db,SQLITE_LIMIT_SQL_LENGTH,4096);sqlite3_limit(db,SQLITE_LIMIT_COLUMN,256);
     sqlite3_busy_timeout(db,250);sqlite3_progress_handler(db,1000,progress,&steps);sqlite3_set_authorizer(db,authorize,NULL);
-    if(sqlite3_prepare_v2(db,"SELECT titleId FROM tbl_contentinfo WHERE titleId != '' ORDER BY titleId COLLATE BINARY;",-1,&stmt,NULL)!=SQLITE_OK||
-       !sqlite3_stmt_readonly(stmt))goto done;
-    int rc;
+    /* Add-on/DLC and patch rows share their game's titleId, and system rows
+     * need not be nine-character IDs. DISTINCT keeps one coverage row per
+     * title; rows that cannot name an application folder are skipped. */
+    if(sqlite3_prepare_v2(db,"SELECT DISTINCT titleId FROM tbl_contentinfo WHERE titleId != '' ORDER BY titleId COLLATE BINARY;",-1,&stmt,NULL)!=SQLITE_OK||
+       !sqlite3_stmt_readonly(stmt)){bw_send_log("media-db-refused","stage=prepare error=%s",db?sqlite3_errmsg(db):"open");goto done;}
+    int rc;unsigned skipped=0;
     while((rc=sqlite3_step(stmt))==SQLITE_ROW){
-        if(out->count==BW_MEDIA_PUBLIC_DB_LIMIT||sqlite3_column_type(stmt,0)!=SQLITE_TEXT||sqlite3_column_bytes(stmt,0)!=9)goto done;
-        const unsigned char *title=sqlite3_column_text(stmt,0);if(!title)goto done;
-        for(unsigned i=0;i<9;i++)if(!((title[i]>='A'&&title[i]<='Z')||(title[i]>='0'&&title[i]<='9')))goto done;
+        if(out->count==BW_MEDIA_PUBLIC_DB_LIMIT){bw_send_log("media-db-refused","stage=limit count=%zu",out->count);goto done;}
+        const unsigned char *title=sqlite3_column_type(stmt,0)==SQLITE_TEXT&&sqlite3_column_bytes(stmt,0)==9?sqlite3_column_text(stmt,0):NULL;
+        int shaped=title!=NULL;
+        for(unsigned i=0;shaped&&i<9;i++)if(!((title[i]>='A'&&title[i]<='Z')||(title[i]>='0'&&title[i]<='9')))shaped=0;
+        if(!shaped){skipped++;continue;}
         char *slot=out->title[out->count];memcpy(slot,title,9);slot[9]=0;
-        if(out->count&&strcmp(out->title[out->count-1],slot)>=0)goto done;out->count++;
+        if(out->count&&strcmp(out->title[out->count-1],slot)>=0){bw_send_log("media-db-refused","stage=order title=%s",slot);goto done;}out->count++;
     }
     if(rc==SQLITE_DONE)result=0;
+    else bw_send_log("media-db-refused","stage=step rc=%d error=%s",rc,sqlite3_errmsg(db));
+    if(!result)bw_send_log("media-db-titles","count=%zu skipped=%u",out->count,skipped);
 done:
     if(stmt&&sqlite3_finalize(stmt)!=SQLITE_OK)result=-1;if(db&&sqlite3_close(db)!=SQLITE_OK)result=-1;
     if(lstat(path,&after)||!S_ISREG(after.st_mode)||after.st_nlink!=1||before.st_dev!=after.st_dev||before.st_ino!=after.st_ino||

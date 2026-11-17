@@ -16,7 +16,7 @@ static unsigned cases,checks;
 #define CHECK(x) do{checks++;if(!(x)){fprintf(stderr,"media public case%u line%d: %s\n",cases,__LINE__,#x);exit(1);}}while(0)
 struct fixture {
     char root[PATH_MAX],apps[PATH_MAX];double clock;
-    unsigned own_row,other_row,db_reads,stages,asset_reads,sdk_opens,initializes,terminates,title_calls,batch_calls,waits,reports;
+    unsigned own_row,other_row,pkg_row,db_reads,stages,asset_reads,sdk_opens,initializes,terminates,title_calls,batch_calls,waits,reports;
     int current_bad,assets_bad,sdk_bad,initialize_bad,title_busy,db_bad,no_title,create_row,install_result,change_wait,change_init,change_install;
 };
 static struct fixture *active;
@@ -51,13 +51,16 @@ static void begin(struct fixture *f){
     f->clock=10;f->other_row=1;f->create_row=1;active=f;make_app(f,"KEEP00001");cases++;
 }
 static void finish(struct fixture *f){
-    CHECK(!strncmp(f->root,"/tmp/blackwire-media-public-",28));remove_app(f,"LINK00001");remove_app(f,BW_MEDIA_PUBLIC_TITLE);remove_app(f,"KEEP00001");
+    CHECK(!strncmp(f->root,"/tmp/blackwire-media-public-",28));remove_app(f,"LINK00001");remove_app(f,BW_MEDIA_PUBLIC_TITLE);
+    char extra[PATH_MAX];struct stat st;path(extra,f->apps,"PKGE00001");if(!lstat(extra,&st))CHECK(!rmdir(extra));
+    path(extra,f->apps,"stray.lock");if(!lstat(extra,&st))CHECK(!unlink(extra));remove_app(f,"KEEP00001");
     CHECK(!rmdir(f->apps));CHECK(!rmdir(f->root));active=NULL;
 }
 int bw_registration_db_titles(const char *database,struct bw_registration_titles *out){
     struct fixture *f=active;CHECK(f&&database&&!strcmp(database,"modeled-read-only-title-provider"));f->db_reads++;memset(out,0,sizeof *out);
     if(f->db_bad)return -1;
     if(f->other_row)strcpy(out->title[out->count++],"KEEP00001");
+    if(f->pkg_row)strcpy(out->title[out->count++],"PKGE00001");
     if(f->own_row)strcpy(out->title[out->count++],BW_MEDIA_PUBLIC_TITLE);
     return 0;
 }
@@ -111,15 +114,18 @@ int main(void){
     unsigned opens=f.sdk_opens,stages=f.stages;CHECK(run(&f,&r)<0);CHECK(f.title_calls==1&&!f.batch_calls&&f.sdk_opens==opens&&f.stages==stages);
     f.own_row=1;CHECK(!run(&f,&r));CHECK(r.registered&&f.title_calls==1&&f.sdk_opens==opens);finish(&f);
 
-    begin(&f);memset(&r,0,sizeof r);f.other_row=0;CHECK(run(&f,&r)<0);no_install(&f,&r);CHECK(!f.sdk_opens);finish(&f);
+    begin(&f);memset(&r,0,sizeof r);f.other_row=0;f.no_title=1;CHECK(run(&f,&r)<0);no_install(&f,&r);CHECK(f.sdk_opens==1&&f.terminates==f.initializes&&!strcmp(r.reason,"other_application_not_registered")&&!strncmp(r.detail,"KEEP00001",9));finish(&f);
+    /* The per-title export installs only Blackwire's folder, so an unrelated
+     * unregistered system folder does not block it. */
+    begin(&f);memset(&r,0,sizeof r);f.other_row=0;CHECK(!run(&f,&r));CHECK(r.registered&&f.title_calls==1&&!f.batch_calls);finish(&f);
 
     begin(&f);memset(&r,0,sizeof r);f.sdk_bad=1;CHECK(run(&f,&r)<0);no_install(&f,&r);CHECK(f.sdk_opens==1&&!f.initializes&&!strcmp(r.reason,"normal_public_sdk_unavailable"));finish(&f);
 
     begin(&f);memset(&r,0,sizeof r);f.initialize_bad=1;CHECK(run(&f,&r)<0);no_install(&f,&r);CHECK(f.initializes==1&&!f.terminates&&r.initialize_status==-17);finish(&f);
 
-    begin(&f);memset(&r,0,sizeof r);f.current_bad=1;CHECK(run(&f,&r)<0);no_install(&f,&r);CHECK(!f.stages&&!f.sdk_opens);finish(&f);
+    begin(&f);memset(&r,0,sizeof r);f.current_bad=1;CHECK(run(&f,&r)<0);no_install(&f,&r);CHECK(!f.stages&&!f.sdk_opens&&!strcmp(r.reason,"console_not_idle_or_owner_changed"));finish(&f);
 
-    begin(&f);memset(&r,0,sizeof r);f.assets_bad=1;CHECK(run(&f,&r)<0);no_install(&f,&r);CHECK(f.stages==1&&!f.sdk_opens);finish(&f);
+    begin(&f);memset(&r,0,sizeof r);f.assets_bad=1;CHECK(run(&f,&r)<0);no_install(&f,&r);CHECK(f.stages==1&&!f.sdk_opens&&!strcmp(r.reason,"media_shortcut_files_not_prepared"));finish(&f);
 
     begin(&f);memset(&r,0,sizeof r);f.change_wait=1;CHECK(run(&f,&r)<0);no_install(&f,&r);CHECK(!f.sdk_opens&&!strcmp(r.reason,"application_inventory_not_stable_before_sdk"));finish(&f);
 
@@ -127,9 +133,9 @@ int main(void){
 
     begin(&f);memset(&r,0,sizeof r);f.change_install=1;CHECK(run(&f,&r)<0);CHECK(r.phase==BW_MEDIA_PUBLIC_UNCONFIRMED&&r.attempted&&r.returned&&!r.registered&&f.title_calls==1&&f.terminates==1&&!strcmp(r.reason,"application_inventory_changed_after_call"));finish(&f);
 
-    begin(&f);memset(&r,0,sizeof r);f.title_busy=1;CHECK(run(&f,&r)<0);no_install(&f,&r);CHECK(!f.sdk_opens);finish(&f);
+    begin(&f);memset(&r,0,sizeof r);f.title_busy=1;CHECK(run(&f,&r)<0);no_install(&f,&r);CHECK(!f.sdk_opens&&!strcmp(r.reason,"application_registration_pending"));finish(&f);
 
-    begin(&f);memset(&r,0,sizeof r);f.db_bad=1;CHECK(run(&f,&r)<0);no_install(&f,&r);CHECK(!f.sdk_opens&&f.db_reads==1);finish(&f);
+    begin(&f);memset(&r,0,sizeof r);f.db_bad=1;CHECK(run(&f,&r)<0);no_install(&f,&r);CHECK(!f.sdk_opens&&f.db_reads==1&&!strcmp(r.reason,"app_db_titles_unreadable"));finish(&f);
 
     begin(&f);memset(&r,0,sizeof r);char app[PATH_MAX],sys[PATH_MAX],file[PATH_MAX];path(app,f.apps,"KEEP00001");path(sys,app,"sce_sys");path(file,sys,"param.json");
     write_bytes(file,"{\"titleId\":\"KEEP00001\",\"titleId\":\"KEEP00001\"}");CHECK(run(&f,&r)<0);no_install(&f,&r);CHECK(!f.sdk_opens);finish(&f);
@@ -139,5 +145,15 @@ int main(void){
     /* A returned SDK error cannot outweigh a stable, positively observed own
      * row; the row is the existing core's registration proof. */
     begin(&f);memset(&r,0,sizeof r);f.install_result=-31;CHECK(!run(&f,&r));CHECK(r.registered&&r.returned&&r.platform_status==-31&&f.title_calls==1&&!f.batch_calls);finish(&f);
+    /* Package installs keep sce_sys inside the mounted image: a registered
+     * folder without sce_sys is covered by its row, an unregistered one is not. */
+    begin(&f);memset(&r,0,sizeof r);path(app,f.apps,"PKGE00001");CHECK(!mkdir(app,0755));f.pkg_row=1;
+    CHECK(!run(&f,&r));CHECK(r.registered&&f.title_calls==1&&!f.batch_calls);finish(&f);
+
+    begin(&f);memset(&r,0,sizeof r);path(app,f.apps,"PKGE00001");CHECK(!mkdir(app,0755));f.no_title=1;CHECK(run(&f,&r)<0);no_install(&f,&r);
+    CHECK(f.sdk_opens==1&&!strcmp(r.reason,"other_application_not_registered")&&!strncmp(r.detail,"PKGE00001",9));finish(&f);
+
+    /* A name that cannot be a title folder is never installed and does not block. */
+    begin(&f);memset(&r,0,sizeof r);path(file,f.apps,"stray.lock");write_bytes(file,"x");CHECK(!run(&f,&r));CHECK(r.registered&&f.title_calls==1);finish(&f);
     printf("{\"passed\":true,\"cases\":%u,\"checks\":%u,\"actualPublicMediaCore\":true,\"actualPosixInventory\":true,\"actualDocumentParser\":true,\"sdkClockAndReadonlyTitleProviderModeled\":true,\"actualSqlite\":false,\"consoleActions\":0}\n",cases,checks);return 0;
 }

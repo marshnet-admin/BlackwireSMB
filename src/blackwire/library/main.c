@@ -46,6 +46,7 @@ static struct bd_resident *dashboard;
 #include "startup_runtime_idle.h"
 #include "media_public_trial.h"
 #include "media_startup.h"
+#include "send_diagnostic.h"
 #include <pthread.h>
 #endif
 #ifndef BW_MEDIA_APP_PARENT
@@ -408,9 +409,9 @@ static int media_prepare_files(void) {
     {SYS_DIR "/.blackwire-icon.new", ICON_PATH, 0, 0, 0, 0}
   };
   int result = -1;
-  if (media_directories_open(&dirs)) goto finish;
+  if (media_directories_open(&dirs)) { int error = errno, owned = media_parameter_owned() ? 0 : 1; bw_send_log("media-assets-refused", "stage=directories errno=%d owned=%d", error, owned); goto finish; }
   if (media_stage_asset(&stages[0], param_json, param_json_size) ||
-      media_stage_asset(&stages[1], brand_logo_png, brand_logo_png_size)) goto finish;
+      media_stage_asset(&stages[1], brand_logo_png, brand_logo_png_size)) { bw_send_log("media-assets-refused", "stage=write errno=%d", errno); goto finish; }
   for (unsigned i = 0; i < 2; i++) {
     if (!media_namespace_current(&dirs, 1)) goto finish;
     if (stages[i].created) {
@@ -422,6 +423,7 @@ static int media_prepare_files(void) {
   }
   if (media_namespace_current(&dirs, 0) && asset_matches(PARAM_PATH, param_json, param_json_size) &&
       asset_matches(ICON_PATH, brand_logo_png, brand_logo_png_size)) result = 0;
+  else bw_send_log("media-assets-refused", "stage=final errno=%d", errno);
 finish:
   for (unsigned i = 0; i < 2; i++) media_stage_cleanup(&stages[i]);
   if (result) media_empty_created_directories(&dirs);
@@ -536,6 +538,7 @@ static void *media_public_worker(void *opaque){
    * controls, a different nonce, or any registration ownership ledger. */
   pthread_mutex_lock(&s->lock);unsigned reserved=s->reserved,unknown=s->release_unknown;pthread_mutex_unlock(&s->lock);
   int released=unknown?1:reserved?bw_native_backend_external_release_idle(native_backend,s->nonce):0;
+  bw_send_log("media-setup-end","phase=%s reason=%s detail=%s registered=%u attempted=%u",bw_media_public_phase_name(record.phase),record.reason?record.reason:"none",record.detail,record.registered,record.attempted);
   pthread_mutex_lock(&s->lock);s->record=record;s->running=0;
   if(released)s->release_unknown=1;else{s->reserved=0;bw_native_sensitive_clear(s->nonce,sizeof s->nonce);}
   pthread_mutex_unlock(&s->lock);
@@ -579,11 +582,13 @@ static int media_public_handle(const char *method,const char *url,const void *bo
   int action=!strcmp(url,"/api/media/register-public-sdk"),status=!strcmp(url,"/api/media/public-sdk-status");if(!action&&!status)return 1;
   if(status){
     if(strcmp(method,"GET"))return media_public_reply(out,405,"{\"error\":\"Media status requires GET\"}");
-    char bytes[640],platform[32];pthread_mutex_lock(&media_trial.lock);struct bw_media_public_record record=media_trial.record;
+    char bytes[768],platform[32],detail[64];pthread_mutex_lock(&media_trial.lock);struct bw_media_public_record record=media_trial.record;
     unsigned running=media_trial.running,held=media_trial.reserved||media_trial.release_unknown;pthread_mutex_unlock(&media_trial.lock);
     if(record.returned)snprintf(platform,sizeof platform,"%d",record.platform_status);else snprintf(platform,sizeof platform,"null");
-    snprintf(bytes,sizeof bytes,"{\"titleId\":\"PSBW50001\",\"phase\":\"%s\",\"mode\":\"%s\",\"running\":%s,\"registrationAttempted\":%s,\"platformReturned\":%s,\"platformStatus\":%s,\"registered\":%s,\"reservationHeld\":%s,\"reason\":\"%s\"}",
-      bw_media_public_phase_name(record.phase),bw_media_public_mode_name(record.mode),running?"true":"false",record.attempted?"true":"false",record.returned?"true":"false",platform,record.registered?"true":"false",held?"true":"false",record.reason?record.reason:"not_requested");
+    size_t used=0;for(size_t i=0;record.detail[i]&&used+1<sizeof detail;i++){unsigned char c=(unsigned char)record.detail[i];
+      if(c>=32&&c<127&&c!='"'&&c!='\\')detail[used++]=(char)c;}detail[used]=0;
+    snprintf(bytes,sizeof bytes,"{\"titleId\":\"PSBW50001\",\"phase\":\"%s\",\"mode\":\"%s\",\"running\":%s,\"registrationAttempted\":%s,\"platformReturned\":%s,\"platformStatus\":%s,\"registered\":%s,\"reservationHeld\":%s,\"reason\":\"%s\",\"detail\":\"%s\"}",
+      bw_media_public_phase_name(record.phase),bw_media_public_mode_name(record.mode),running?"true":"false",record.attempted?"true":"false",record.returned?"true":"false",platform,record.registered?"true":"false",held?"true":"false",record.reason?record.reason:"not_requested",detail);
     return media_public_reply(out,200,bytes);
   }
   if(strcmp(method,"POST"))return media_public_reply(out,405,"{\"error\":\"Media registration requires explicit authenticated POST\"}");

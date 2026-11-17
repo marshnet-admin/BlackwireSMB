@@ -21,6 +21,7 @@ struct bw_media_public_record {
     unsigned attempted,returned,registered;
     int platform_status,initialize_status,terminate_status;
     const char *reason; /* fixed source strings only; never a borrowed path */
+    char detail[64]; /* copied failing step/title/errno for status; never authority */
 };
 struct bw_media_public_sdk {
     int (*initialize)(void);

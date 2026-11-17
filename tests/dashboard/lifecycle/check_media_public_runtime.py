@@ -23,7 +23,7 @@ def main():
  for i,p in enumerate(sources):
   obj=out/f'host-{i}.o';dep=obj.with_suffix('.d');deps.append(dep);run('compile-'+p.stem,['clang-18',*flags,'-MMD','-MF',dep,'-c',p,'-o',obj]);objects.append(obj)
  binary=out/'media-public-runtime';run('link',['clang-18',*flags,*objects,'-o',binary]);observed=json.loads(run('actual-public-media-core',[binary]))
- if not observed.get('passed') or observed.get('cases')!=17:raise ValueError('All 17 actual-core scenarios are required')
+ if not observed.get('passed') or observed.get('cases')!=21:raise ValueError('All 21 actual-core scenarios are required')
  actual={Path(__file__).resolve(),*sources}
  for dep in deps:
   for n in shlex.split(dep.read_text().replace('\\\n',' ').split(':',1)[1]):actual.add((ROOT/n).resolve())
