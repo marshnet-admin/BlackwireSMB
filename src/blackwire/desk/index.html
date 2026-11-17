@@ -59,6 +59,29 @@
   .progress-top{display:flex;justify-content:space-between;color:var(--muted);font-size:14px;margin-bottom:8px}
   .bar{height:6px;border-radius:6px;background:#22272e;overflow:hidden}
   .bar span{display:block;height:100%;background:var(--blue);border-radius:6px;transition:width .4s}
+  .progress-step{font-size:12px;letter-spacing:.6px;text-transform:uppercase;color:var(--blue);margin-bottom:6px}
+  .progress-activity{margin:8px 0 0;color:var(--muted);font-size:13px}
+  .technical{margin-top:8px;color:var(--muted);font-size:12px}
+  .technical summary{cursor:pointer}
+  .technical code{display:block;margin-top:6px;white-space:pre-wrap;word-break:break-word;font-size:12px;color:#c9d1db}
+  .media-state{font-size:14px;margin:4px 0 12px}
+  .media-state[data-kind="ok"]{color:var(--green)} .media-state[data-kind="bad"]{color:var(--red)} .media-state[data-kind="muted"]{color:var(--muted)}
+  .activity-bar{position:fixed;left:50%;top:12px;transform:translateX(-50%);z-index:40;display:flex;align-items:center;gap:12px;
+    max-width:min(680px,calc(100vw - 32px));padding:10px 14px;border-radius:12px;background:rgba(16,18,22,.94);border:1px solid var(--line);box-shadow:0 10px 30px rgba(0,0,0,.6)}
+  .activity-bar[hidden]{display:none}
+  .activity-dot{width:9px;height:9px;border-radius:50%;background:var(--blue);flex:none;animation:pulse 1.4s infinite}
+  .activity-bar[data-kind="bad"] .activity-dot{background:var(--red);animation:none}
+  .activity-bar[data-kind="play"] .activity-dot{background:var(--green)}
+  .activity-text{display:flex;flex-direction:column;min-width:0;font-size:13px;color:var(--muted)}
+  .activity-text strong{color:var(--text);font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .activity-text span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .activity-meter{width:90px;height:4px;border-radius:4px;background:#22272e;overflow:hidden;flex:none}
+  .activity-meter span{display:block;height:100%;width:0;background:var(--blue)}
+  .activity-bar[data-meter="none"] .activity-meter{display:none}
+  .cover .badge{display:none}
+  .state-pill{position:absolute;left:7px;bottom:7px;font-size:10px;font-weight:700;letter-spacing:.4px;padding:2px 7px;border-radius:999px;background:rgba(0,0,0,.78);color:#dfe6ee;white-space:nowrap;max-width:calc(100% - 14px);overflow:hidden;text-overflow:ellipsis}
+  .state-pill[data-kind="ready"]{color:var(--green)} .state-pill[data-kind="prep"]{color:var(--blue)} .state-pill[data-kind="bad"]{color:var(--red)} .state-pill[data-kind="muted"]{color:var(--muted)} .state-pill[data-kind="play"]{color:var(--green)}
+  .tab:focus-visible,.chip:focus-visible,.link:focus-visible,.search .x:focus-visible,.technical summary:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
 
   /* Library rail */
   .rail-wrap{margin-top:auto}
@@ -163,8 +186,11 @@
     <button class="status" id="heroStatus" type="button" aria-expanded="false" aria-controls="heroReason"><i aria-hidden="true"></i><span id="heroStatusLabel"></span></button>
     <p class="reason" id="heroReason" role="status" aria-live="polite" hidden></p></div>
     <div class="progress" id="preparationStatus" hidden>
+      <div class="progress-step" id="preparationStepLabel" hidden></div>
       <div class="progress-top"><span id="preparationDetail"></span><span id="preparationPercent"></span></div>
       <div class="bar" id="preparationTrack" role="progressbar" aria-label="Startup file preparation"><span id="preparationFill" style="width:0%"></span></div>
+      <p class="progress-activity" id="preparationActivity" hidden></p>
+      <details class="technical" id="preparationTechnical" hidden><summary>Technical details</summary><code id="preparationTechnicalText"></code></details>
     </div>
     <div class="actions" id="heroActions" hidden>
       <button class="btn btn-primary" id="heroPrimary" type="button" disabled></button>
@@ -202,6 +228,7 @@
   <h3 id="setupHeading">Settings</h3>
   <p>The PS5 reads your games from up to two shared folders on the same PC.</p>
   <p class="conn-state" id="settingsConnection"><span class="dot" id="settingsDot"></span><span id="savedConnectionStatus">Connection status unavailable</span></p>
+  <p class="media-state" id="mediaStatus" data-kind="muted">PS5 Media shortcut: checking…</p>
   <form id="setup" autocomplete="off">
     <div class="field" id="nativeServerField"><label for="server">PC address</label><input id="server" autocomplete="off" spellcheck="false" disabled></div>
     <div class="field" id="nativeShareField"><label for="shareName">Shared folder name</label><input id="shareName" autocomplete="off" spellcheck="false" disabled></div>
@@ -236,6 +263,12 @@
   <button id="focusSearch" type="button"></button><button id="previousGame" type="button"></button><button id="nextGame" type="button"></button><span id="railPosition"></span>
   <aside id="preparationToast" hidden><span id="preparationToastTitle"></span><span id="preparationToastDetail"></span></aside>
 </div>
+<aside id="activityBar" class="activity-bar" role="status" aria-live="polite" hidden>
+  <span class="activity-dot" aria-hidden="true"></span>
+  <span class="activity-text"><strong id="activityTitle"></strong><span id="activityDetail"></span></span>
+  <span class="activity-meter" aria-hidden="true"><span id="activityFill"></span></span>
+  <button id="activityOpen" class="btn btn-ghost small" type="button">Show</button>
+</aside>
 <aside id="browserHandoff" class="browser-handoff" role="status" aria-live="polite" hidden>Game started. Close the PS5 browser with the controller to see it.</aside>
 <script id="blackwire-view-model">
     (function (root) {
@@ -459,10 +492,22 @@
         }
         else if(status === "setup-needed") {message="Startup files are kept. Choose Finish setup and play for this game; no files need to be sent again.";percent=100;}
         else if(status === "unknown") {message=state.dashboardUnavailable || message || "The existing operation needs a fresh status check. No request was repeated.";percent=null;}
-        else if(status === "error") {message=message || "The startup files could not be prepared. Review this result before retrying.";percent=null;}
-        else message=phase;
+        var technical="",activity="",live=progress && progress.message || "";
+        if(status === "error") {
+          var explained=explainReason(message);message=explained.text || "The startup files could not be prepared. Review this result before retrying.";technical=explained.technical;percent=null;
+        }
+        else if(status === "preparing") {
+          // The backend's own live text (for example the setup sub-step) is
+          // shown under the phase name when it adds information.
+          var entries=/: (\d+ entries checked)\.$/.exec(live);
+          if(entries)activity=entries[1].charAt(0).toUpperCase()+entries[1].slice(1);
+          else if(live && progress.phase === 12 && live.indexOf(phase) !== 0)activity=live;
+          message=phase;
+        }
+        var step=observed && status === "preparing" ? preparationStep(progress.phase) : null;
         return {visible:true,key:progress && nonce(progress.jobId) ? progress.jobId : id,itemId:itemId,title:title,state:status,heading:heading,message:message,
-          detail:detail || (busy ? "You can browse the library while this prepares." : "Open this game to see its current actions."),percent:percent,busy:busy || status === "unknown"};
+          detail:detail || (busy ? "You can browse the library while this prepares." : "Open this game to see its current actions."),percent:percent,busy:busy || status === "unknown",
+          step:step,activity:activity,technical:technical,phase:observed ? progress.phase : null,bytes:observed ? progress.bytes : 0,bytesTotal:observed ? progress.bytesTotal : 0,setup:status === "preparing" && observed && progress.phase === 12};
       }
       function preparationBusyReason(state) {
         var panel=preparationPanel(state,null);return panel.visible && panel.busy ? (panel.state === "unknown" ? "Checking preparation for " : "Preparing ") + panel.title + ". Wait for this operation to finish." : "";
@@ -708,11 +753,86 @@
       function saveSetup(body, request, token) {
         return request("/api/setup", body, token);
       }
+      var preparationSteps=[{label:"Checking the PC source",phases:[0,1,2,3,4,5]},{label:"Checking console files",phases:[6]},{label:"Copying startup files",phases:[7]},
+        {label:"Building the game index",phases:[8,9,10]},{label:"Checking console storage",phases:[11]},{label:"Reader and PS5 dashboard setup",phases:[12]}];
+      function preparationStep(phase) {
+        for(var i=0;i<preparationSteps.length;i++)if(preparationSteps[i].phases.indexOf(phase) !== -1)return {index:i+1,total:preparationSteps.length,label:preparationSteps[i].label};
+        return null;
+      }
+      // Samples are [{t:milliseconds,bytes:n}] for one job, oldest first.
+      function transferEstimate(samples,bytesTotal) {
+        if(!samples || samples.length < 2 || !(bytesTotal > 0))return null;
+        // Oldest sample within the last 15 s, or at least the previous one.
+        var last=samples[samples.length-1],first=samples[samples.length-2];
+        for(var i=samples.length-3;i>=0;i--){if(last.t-samples[i].t>15000)break;first=samples[i];}
+        var dt=last.t-first.t,db=last.bytes-first.bytes;
+        if(!(dt >= 2000) || !(db > 0))return null;
+        var rate=db*1000/dt,remaining=Math.max(0,bytesTotal-last.bytes);
+        return {rate:rate,seconds:remaining/rate};
+      }
+      function rateLabel(rate) {return typeof rate === "number" && isFinite(rate) && rate > 0 ? (rate/1048576 >= 10 ? Math.round(rate/1048576) : (rate/1048576).toFixed(1))+" MiB/s" : "";}
+      function remainingLabel(seconds) {
+        if(typeof seconds !== "number" || !isFinite(seconds) || seconds < 0)return "";
+        if(seconds < 60)return "under a minute left";
+        var minutes=Math.round(seconds/60);if(minutes < 60)return "about "+minutes+" min left";
+        return "about "+Math.floor(minutes/60)+" h "+(minutes%60)+" min left";
+      }
+      function clockLabel(ms) {
+        if(typeof ms !== "number" || !isFinite(ms) || ms < 0)return "";
+        var seconds=Math.floor(ms/1000),minutes=Math.floor(seconds/60),rest=String(seconds%60);if(rest.length < 2)rest="0"+rest;
+        if(minutes < 60)return minutes+":"+rest;
+        var part=String(minutes%60);if(part.length < 2)part="0"+part;return Math.floor(minutes/60)+":"+part+":"+rest;
+      }
+      // Plain-language explanations for known technical reasons. The original
+      // text is always kept as technical detail; nothing here changes actions.
+      var reasonHelp=[
+        ["reader_upgrade_predecessor_unknown","This Blackwire payload does not match the reader installed for this game. Load the matching Blackwire ELF, then refresh this page. Sending the game files again will not fix this version mismatch."],
+        ["invalid_or_overbudget_source_plan","This game’s files could not be planned for streaming: it uses an unsupported archive layout or needs more startup files than the PS5 space budget allows."],
+        ["projected_companion_metadata_differs","Launch files left over from an earlier session no longer match this game. Close any running game, then choose Finish setup."],
+        ["projected_companion_is_missing","Some of this game’s launch files are missing on the PS5. Choose Finish setup to restore them without sending the game again."],
+        ["stale-launch-inputs","Launch files left over from an earlier session could not be cleared. Close any running game, then try again."],
+        ["registration_deadline_expired","ShadowMount did not finish adding this game to the PS5 library in time. Your files were kept; choose Finish setup to try again."],
+        ["registration_conflict","Another console copy already uses this game’s title. That copy was kept; remove one of them first."],
+        ["registration_api_incompatible","ShadowMount is not running or is an incompatible version. Start ShadowMount, then try again."],
+        ["registration_ownership_intent_unconfirmed","Game registration could not be confirmed. No game was started."],
+        ["STATUS_LOGON_FAILURE","The PC/NAS share rejected the username or password. Check them in Settings."],
+        ["STATUS_ACCESS_DENIED","The share account cannot read this folder. Check the share permissions on the PC/NAS."],
+        ["STATUS_BAD_NETWORK_NAME","The shared folder name was not found on the PC/NAS. Check it in Settings."],
+        ["No space left","The PS5 does not have enough free space for this game’s startup files."],
+        ["current setup authority refused","Setup was interrupted because the console was busy. Close any running game, then choose Finish setup."]
+      ];
+      function explainReason(message) {
+        if(typeof message !== "string" || !message)return {text:"",technical:""};
+        for(var i=0;i<reasonHelp.length;i++)if(message.indexOf(reasonHelp[i][0]) !== -1)return {text:reasonHelp[i][1],technical:message === reasonHelp[i][1] ? "" : message};
+        var setup=/^Startup files kept\. Setup step (\d+) \(([^)]*)\): ([\s\S]*?) \(raw=/.exec(message);
+        if(setup)return {text:"Startup files were kept, but PS5 dashboard setup stopped at step "+setup[1]+" ("+setup[3]+"). Choose Finish setup to try again.",technical:message};
+        return {text:message,technical:""};
+      }
       function failureMessage(message) {
         if (typeof message !== "string") return "";
-        if (message.indexOf("reason=reader_upgrade_predecessor_unknown") !== -1)
-          return "This Blackwire payload does not match the reader installed for this game. Load the matching Blackwire ELF, then refresh this page. Sending the game files again will not fix this version mismatch.";
+        if (message.indexOf("reason=reader_upgrade_predecessor_unknown") !== -1) return explainReason("reader_upgrade_predecessor_unknown").text;
         return message;
+      }
+      function refreshReason(state,pending) {
+        if(state.backend !== "native")return "Refresh is available when the console library is connected.";
+        if(pending)return "Wait for the current request to finish.";
+        if((state.library || {}).phase === "scanning")return "The library is being scanned…";
+        if(active(state.stream || {}))return "A game session is active. Close it to refresh.";
+        if(activeJobs(state).length || dashboardBusy(state))return "Wait for the current file preparation or operation to finish.";
+        if((state.setup || {}).busy)return "Settings are being applied.";
+        return "";
+      }
+      function mediaStatusLabel(status) {
+        if(!status || typeof status.phase !== "string")return {text:"PS5 Media shortcut: status unavailable",kind:"muted"};
+        if(status.registered === true)return {text:"PS5 Media shortcut: registered ✓",kind:"ok"};
+        if(status.running === true)return {text:"PS5 Media shortcut: setting up…",kind:"muted"};
+        return {text:"PS5 Media shortcut: needs attention"+(status.reason ? " ("+status.reason+(status.detail ? ", "+status.detail : "")+")" : ""),kind:"bad"};
+      }
+      function sessionSummary(stream) {
+        stream=stream || {};
+        if(typeof stream.networkBytes !== "number" || !isFinite(stream.networkBytes) || stream.networkBytes <= 0)return null;
+        var ms=stream.elapsedMs;if(typeof ms !== "number" || !isFinite(ms) || ms <= 0)return null;
+        return {bytes:stream.networkBytes,elapsedMs:ms,rate:stream.networkBytes*1000/ms,cacheBytes:typeof stream.cacheHitBytes === "number" ? stream.cacheHitBytes : 0};
       }
       function failure(state, game) {
         var stream=state.stream || {}, value=stream.lastFailure;
@@ -836,7 +956,7 @@
       }
       var api = { dashboardLibrary:dashboardLibrary,libraryGames:libraryGames,dashboardBody:dashboardBody,dashboardAccepted:dashboardAccepted,dashboardPost:dashboardPost,dashboardWatch:dashboardWatch,dashboardBusy:dashboardBusy,browserHandoff:browserHandoff,
         preparationPanel:preparationPanel,preparationNotifications:preparationNotifications,validPreparation:validPreparation,
-        failure:failure, canRefresh:canRefresh, consoleBrowser:consoleBrowser, runningGameReason:runningGameReason, elapsedLabel:elapsedLabel, sessionPanel:sessionPanel, sessionNotice:sessionNotice, active: active, activeJobs: activeJobs, connection:connection, readState:readState, readAppState:readAppState, setupPresentation:setupPresentation, setupBody:setupBody, setupResult:setupResult, preparationBody:preparationBody, playBody:playBody, dashboardLaunch:dashboardLaunch, orderedGames:orderedGames, controllerStep:controllerStep, ready:ready, matches: matches, counts:counts, actions: actions, saveSetup:saveSetup };
+        failure:failure, canRefresh:canRefresh, refreshReason:refreshReason, failureMessage:failureMessage, preparationStep:preparationStep, transferEstimate:transferEstimate, rateLabel:rateLabel, remainingLabel:remainingLabel, clockLabel:clockLabel, explainReason:explainReason, mediaStatusLabel:mediaStatusLabel, sessionSummary:sessionSummary, consoleBrowser:consoleBrowser, runningGameReason:runningGameReason, elapsedLabel:elapsedLabel, sessionPanel:sessionPanel, sessionNotice:sessionNotice, active: active, activeJobs: activeJobs, connection:connection, readState:readState, readAppState:readAppState, setupPresentation:setupPresentation, setupBody:setupBody, setupResult:setupResult, preparationBody:preparationBody, playBody:playBody, dashboardLaunch:dashboardLaunch, orderedGames:orderedGames, controllerStep:controllerStep, ready:ready, matches: matches, counts:counts, actions: actions, saveSetup:saveSetup };
       root.BlackwireView = api;
       if (typeof module !== "undefined" && module.exports) module.exports = api;
     })(typeof window !== "undefined" ? window : globalThis);
@@ -881,6 +1001,42 @@
       var preparationNotice = view.preparationNotifications();
       var preparationToastTimer;
       var preparationCurrent = null;
+      var transferSamples = null, setupSince = Object.create(null), preparationExtras = {step:"",activity:""};
+      function progressExtras(panel) {
+        var result={step:"",activity:""};if(!panel || !panel.visible)return result;
+        if(panel.step)result.step="Step "+panel.step.index+" of "+panel.step.total+" · "+panel.step.label;
+        var parts=[],now=Date.now();if(panel.activity)parts.push(panel.activity);
+        if(panel.busy && panel.state === "preparing") {
+          if(!transferSamples || transferSamples.key !== panel.key || panel.bytes < transferSamples.last)transferSamples={key:panel.key,samples:[],last:0};
+          if(panel.phase === 7 && panel.bytesTotal > 0) {
+            var list=transferSamples.samples,previous=list[list.length-1];
+            if(!previous || now-previous.t >= 1000)list.push({t:now,bytes:panel.bytes});
+            while(list.length > 90)list.shift();transferSamples.last=panel.bytes;
+            var estimate=view.transferEstimate(list,panel.bytesTotal);
+            if(estimate)parts.push(view.rateLabel(estimate.rate)+" · "+view.remainingLabel(estimate.seconds));
+          }
+          if(panel.setup) {
+            if(!setupSince[panel.key])setupSince[panel.key]=now;
+            var elapsed=now-setupSince[panel.key];parts.push("Elapsed "+view.clockLabel(elapsed));
+            if(elapsed > 90000)parts.push("First-time registration with ShadowMount can take several minutes. Keep the console idle.");
+          }
+        }
+        result.activity=parts.join(" · ");return result;
+      }
+      function sessionKey(source) {return "blackwire-last-session:"+source;}
+      function recordSession(stream) {
+        var summary=view.sessionSummary(stream);if(!summary || !stream.game)return;
+        try {localStorage.setItem(sessionKey(stream.game),JSON.stringify({elapsedMs:summary.elapsedMs,bytes:summary.bytes,rate:summary.rate}));}catch(error){}
+      }
+      function lastSession(source) {
+        try {var value=JSON.parse(localStorage.getItem(sessionKey(source)) || "null");
+          if(value && typeof value.elapsedMs === "number" && typeof value.bytes === "number" && typeof value.rate === "number")return value;}catch(error){}
+        return null;
+      }
+      function setReason(element,message) {
+        var explained=view.explainReason(message || "");text(element.text,explained.text);
+        element.root.hidden=!explained.technical;text(element.code,explained.technical);return explained.text;
+      }
       var preparationReadySeen = Object.create(null);
       var preparationReadyTimers = Object.create(null);
       var preparationReadyOrder = [];
@@ -934,6 +1090,7 @@
         card.cover=node("div","cover",card.select);card.coverLabel=node("span","cover-label",card.cover);card.coverLabel.setAttribute("aria-hidden","true");
         card.image=node("img","",card.cover);card.image.loading="lazy";card.image.alt="";
         card.sourceBadge=node("span","src",card.cover);card.statusDot=node("span","badge",card.cover);card.statusDot.setAttribute("aria-hidden","true");
+        card.statePill=node("span","state-pill",card.cover);card.statePill.setAttribute("aria-hidden","true");
         card.railTitle=node("span","card-title",card.select);card.railBadge=node("span","production-hidden",card.select);
         card.details=node("div","game-details",detailsBody);card.details.hidden=true;
         card.title=node("h3","",card.details);card.title.id="game-title-"+(++sequence);card.details.setAttribute("aria-labelledby",card.title.id);
@@ -944,11 +1101,15 @@
         text(node("dt","",kv),"On PS5");card.size=node("dd","",kv);
         text(node("dt","",kv),"Stays on PC");card.stay=node("dd","",kv);
         card.failure=node("p","detail-reason",card.details);card.failure.hidden=true;
+        card.technical={root:node("details","technical",card.details)};text(node("summary","",card.technical.root),"Technical details");
+        card.technical.code=node("code","",card.technical.root);card.technical.root.hidden=true;
         card.progress=node("div","progress",card.details);card.progress.hidden=true;
+        card.progressStep=node("div","progress-step",card.progress);card.progressStep.hidden=true;
         var progressTop=node("div","progress-top",card.progress);card.progressLabel=node("span","",progressTop);card.progressPercent=node("span","",progressTop);
         card.progressTrack=node("div","bar",card.progress);card.progressTrack.setAttribute("role","progressbar");card.progressTrack.setAttribute("aria-label","Startup file preparation");card.progressFill=node("span","",card.progressTrack);
+        card.progressActivity=node("p","progress-activity",card.progress);card.progressActivity.hidden=true;
         var bindings=node("div","detail-bindings",card.details);
-        card.meta=node("p","",bindings);card.homeStatus=node("p","",bindings);card.testing=node("p","",bindings);card.storageNote=node("p","",bindings);card.job=node("p","",bindings);
+        card.meta=node("p","",bindings);card.homeStatus=node("p","",bindings);card.testing=node("p","",bindings);card.storageNote=node("p","",bindings);card.job=node("p","",bindings);card.lastSession=node("p","meta",bindings);card.lastSession.hidden=true;
         card.detailImage=node("img","",bindings);card.detailImage.alt="";
         card.playGroup=node("div","",bindings);card.play=node("button","",card.playGroup);card.play.type="button";card.playReason=node("p","",card.playGroup);
         card.prepareGroup=node("div","",bindings);card.prepare=node("button","",card.prepareGroup);card.prepare.type="button";card.prepareReason=node("p","",card.prepareGroup);
@@ -1107,9 +1268,19 @@
         document.body.style.overflow=any || layout !== "grid" ? "hidden" : "auto";
         syncPreparationPlacement();
       }
+      function loadMediaStatus() {
+        var line=document.getElementById("mediaStatus");text(line,"PS5 Media shortcut: checking…");line.setAttribute("data-kind","muted");
+        // Read-only observation; never starts or repeats Media registration.
+        try {
+          fetch("/api/media/public-sdk-status").then(function (response) {return response.ok ? response.json() : null;}).then(function (value) {
+            var label=view.mediaStatusLabel(value);text(line,label.text);line.setAttribute("data-kind",label.kind);
+          }).catch(function () {var label=view.mediaStatusLabel(null);text(line,label.text);line.setAttribute("data-kind",label.kind);});
+        } catch(error) {var label=view.mediaStatusLabel(null);text(line,label.text);line.setAttribute("data-kind",label.kind);}
+      }
       function openSettings() {
         setDetailsOpen(false,false);document.getElementById("helpOverlay").hidden=true;
         var panel=document.getElementById("setupPanel");panel.open=true;syncOverlays();
+        loadMediaStatus();
         if(!server.disabled)server.focus();else document.getElementById("closeSetup").focus();
       }
       function closeSettings() {
@@ -1197,13 +1368,15 @@
           var detailReason=issue ? issue.message : action.showPlay !== false ? action.playReason : action.prepareReason;
           var ownProgress=view.preparationPanel(state,pending);
           if(ownProgress.visible && ownProgress.itemId === game.dashboardId)detailReason="";
-          text(card.failure,detailReason || "");card.failure.hidden=!detailReason;
+          var shownReason=setReason({text:card.failure,root:card.technical.root,code:card.technical.code},detailReason || "");card.failure.hidden=!shownReason;
           var readiness=game.removed ? "removed" : issue ? "not-ready" : view.ready(game) ? "ready" : "not-ready";
           card.root.setAttribute("data-readiness",readiness);
           card.badge.setAttribute("data-readiness",readiness);
           text(card.badge, action.badge);
           var homeKnown=game.kind === 1 && !game.removed && game.startupReady && typeof game.dashboardLaunchReady === "boolean";
-          text(card.homeStatus,homeKnown ? game.dashboardLaunchReady ? "Ready from the PS5 dashboard." : game.dashboardLaunchReason || "Dashboard setup needs attention. Choose Play here to finish setup without sending the files again." : "");
+          var homeReason=homeKnown && !game.dashboardLaunchReady && game.dashboardLaunchReason ? view.explainReason(game.dashboardLaunchReason) : null;
+          text(card.homeStatus,homeKnown ? game.dashboardLaunchReady ? "Ready from the PS5 dashboard." : homeReason ? homeReason.text : "Dashboard setup needs attention. Choose Play here to finish setup without sending the files again." : "");
+          if(homeReason && homeReason.technical && card.technical.root.hidden){card.technical.root.hidden=false;text(card.technical.code,homeReason.technical);}
           card.homeStatus.className="meta"+(homeKnown ? game.dashboardLaunchReady ? " ok" : " bad" : "");
           card.homeStatus.hidden=!homeKnown;
           text(card.railBadge,action.badge);
@@ -1234,6 +1407,9 @@
           text(card.job, job ? job.error || job.message || job.state : "");
           card.job.className = "job" + (job && job.state === "error" ? " bad" : "");
           card.job.hidden = !job;
+          var previousSession=game.kind === 1 ? lastSession(game.source || game.name) : null;
+          text(card.lastSession,previousSession ? "Last session: "+view.clockLabel(previousSession.elapsedMs)+" · "+amount(previousSession.bytes)+" read from PC · "+view.rateLabel(previousSession.rate)+" average" : "");
+          card.lastSession.hidden=!previousSession;
         });
         Object.keys(cards).forEach(function (name) {
           if (!present[name]) {
@@ -1340,7 +1516,10 @@
           : setup.busy ? "Wait for the PC connection check before refreshing." : libraryRefresh && libraryRefresh.error || "";
         if(!refreshMessage && libraryRefresh && !libraryRefresh.pending && (value.library || {}).generation > libraryRefresh.generation)
           refreshMessage=(value.library || {}).phase === "ready" && !(value.library || {}).stale ? "Library updated." : "Library refresh failed. Check the PC connection and try again.";
-        control(refreshButton,statusFresh && view.canRefresh(value,pending));
+        var refreshAllowed=statusFresh && view.canRefresh(value,pending);
+        // A disabled button always says why, never silently does nothing.
+        if(!refreshAllowed && !refreshMessage)refreshMessage=view.refreshReason(value,pending) || "Refresh is not available right now.";
+        control(refreshButton,refreshAllowed);
         text(refreshButton,refreshing ? "Refreshing…" : "Refresh library");text(refreshStatus,refreshMessage);refreshStatus.hidden=!refreshMessage;
         refreshButton.setAttribute("aria-describedby",refreshMessage ? "libraryRefreshStatus" : "");
         var supported=setup.supported === true;
@@ -1379,9 +1558,22 @@
         });
         syncOverlays();
       }
+      function coverState(card,panel) {
+        var game=card.game || {},stream=state && state.stream || {};
+        if(panel && panel.busy)return {text:typeof panel.percent === "number" ? "Preparing "+Math.round(panel.percent)+"%" : "Preparing",kind:"prep"};
+        if(panel && panel.state === "error")return {text:"Needs attention",kind:"bad"};
+        if(game.removed)return {text:"Removed",kind:"muted"};
+        if(view.active(stream) && stream.game === (game.source || game.name))return {text:stream.phase === "running" ? "Playing" : "Starting",kind:"play"};
+        if(game.kind === 1 && game.startupReady && game.dashboardLaunchReady === false)return {text:"Finish setup",kind:"bad"};
+        if(game.kind === 1 && view.failure(state,game))return {text:"Needs attention",kind:"bad"};
+        if(card.root.getAttribute("data-readiness") === "ready")return {text:"Ready",kind:"ready"};
+        if(game.setupOnly === true)return {text:"Finish setup",kind:"bad"};
+        if(game.canPrepare === true)return {text:"Not sent",kind:"muted"};
+        return {text:"Unavailable",kind:"muted"};
+      }
       function syncPreparationPlacement() {
         var panel=preparationCurrent,region=document.getElementById("preparationStatus");
-        if(!panel){region.hidden=true;return;}
+        if(!panel){region.hidden=true;if(state)renderActivity();return;}
         var visible=panel.visible && !(panel.state === "ready" && preparationReadySeen[panel.key] === "hidden");
         var card=cards[selectedName],matches=card && panel.itemId && card.game.dashboardId === panel.itemId;
         var auxiliary=document.getElementById("setupPanel").open || !document.getElementById("helpOverlay").hidden;
@@ -1391,6 +1583,7 @@
           var current=cards[name],own=visible && panel.itemId && current.game.dashboardId === panel.itemId;
           current.statusDot.style.background=own && panel.busy ? "var(--blue)" : current.root.getAttribute("data-readiness") === "ready" ? "var(--green)" : current.game.removed ? "var(--muted)" : "var(--red)";
           current.statusDot.title=own && panel.busy ? "Preparing" : current.root.getAttribute("data-readiness") === "ready" ? "Ready" : "Not ready";
+          var pill=coverState(current,own ? panel : null);text(current.statePill,pill.text);current.statePill.setAttribute("data-kind",pill.kind);
           current.progress.hidden=!own || !detailsOpen || selectedName !== name || auxiliary;
           current.progress.className="progress"+(!current.progress.hidden ? " on" : "")+(typeof panel.percent !== "number" ? " preparation-indeterminate" : "");
           if(own) {
@@ -1400,8 +1593,36 @@
             if(typeof panel.percent === "number")current.progressTrack.setAttribute("aria-valuenow",String(panel.percent));else current.progressTrack.removeAttribute("aria-valuenow");
             current.progressTrack.setAttribute("aria-valuetext",panel.message+(panel.detail ? ": "+panel.detail : ""));
             current.progressFill.style.width=typeof panel.percent === "number" ? panel.percent+"%" : "";
+            text(current.progressStep,preparationExtras.step);current.progressStep.hidden=!preparationExtras.step;
+            text(current.progressActivity,preparationExtras.activity);current.progressActivity.hidden=!preparationExtras.activity;
           }
         });
+        if(state)renderActivity();
+      }
+      var activityTarget="";
+      function renderActivity() {
+        var bar=document.getElementById("activityBar"),panel=preparationCurrent,stream=state.stream || {},title="",detail="",kind="",meter=null;
+        activityTarget="";
+        var heroShowing=!document.getElementById("preparationStatus").hidden;
+        if(panel && panel.visible && (panel.busy || panel.state === "error") && !heroShowing) {
+          title=panel.heading+(panel.title ? " · "+panel.title : "");
+          detail=[preparationExtras.step,panel.message,preparationExtras.activity].filter(Boolean).join(" · ");
+          kind=panel.state === "error" ? "bad" : "";meter=typeof panel.percent === "number" ? panel.percent : null;
+          var target=Object.keys(cards).filter(function (name) {return panel.itemId && cards[name].game.dashboardId === panel.itemId;})[0];activityTarget=target || "";
+        } else if(view.active(stream) && stream.game) {
+          var game=view.libraryGames(state).filter(function (item) {return (item.source || item.name) === stream.game;})[0];
+          title=(stream.phase === "running" ? "Playing " : "Starting ")+(game ? game.title : stream.game);
+          var summary=view.sessionSummary(stream);
+          detail=summary ? amount(summary.bytes)+" read from PC · "+view.rateLabel(summary.rate)+" average · "+view.clockLabel(summary.elapsedMs) : stream.message || "";
+          kind="play";recordSession(stream);
+          activityTarget=Object.keys(cards).filter(function (name) {return (cards[name].game.source || cards[name].game.name) === stream.game;})[0] || "";
+        }
+        bar.hidden=!title;
+        if(!title)return;
+        bar.setAttribute("data-kind",kind);bar.setAttribute("data-meter",meter === null ? "none" : "value");
+        text(document.getElementById("activityTitle"),title);text(document.getElementById("activityDetail"),detail);
+        document.getElementById("activityFill").style.width=meter === null ? "0%" : meter+"%";
+        document.getElementById("activityOpen").hidden=!activityTarget;
       }
       function renderPreparation() {
         var panel=view.preparationPanel(state,pending);preparationCurrent=panel;
@@ -1432,6 +1653,11 @@
         region.hidden=!panel.visible || panel.state === "ready" && preparationReadySeen[panel.key] === "hidden";
         region.className="progress"+(!region.hidden ? " on" : "")+(typeof panel.percent !== "number" ? " preparation-indeterminate" : "");
         text(document.getElementById("preparationPercent"),typeof panel.percent === "number" ? Math.round(panel.percent)+"%" : "");
+        preparationExtras=progressExtras(panel);
+        var stepLabel=document.getElementById("preparationStepLabel"),activity=document.getElementById("preparationActivity"),technical=document.getElementById("preparationTechnical");
+        text(stepLabel,preparationExtras.step);stepLabel.hidden=!panel.visible || !preparationExtras.step;
+        text(activity,preparationExtras.activity);activity.hidden=!panel.visible || !preparationExtras.activity;
+        text(document.getElementById("preparationTechnicalText"),panel.technical || "");technical.hidden=!panel.visible || !panel.technical;
         if(panel.visible) {
           region.setAttribute("data-state",panel.state);
           region.setAttribute("data-indeterminate",typeof panel.percent === "number" ? "false" : "true");
@@ -1491,6 +1717,7 @@
         note.className = message.kind || "";
         renderCards();
         renderPreparation();
+        renderActivity();
         var panel=view.sessionPanel(state,pending);
         document.getElementById("sessionStatus").hidden=true;
         document.getElementById("sessionStatus").setAttribute("data-failed",panel.failed ? "true" : "false");
@@ -1852,6 +2079,11 @@
         if(!panel.dismissible || !panel.key)return;
         dismissedSessionKey=panel.key;document.getElementById("sessionStatus").hidden=true;
         search.focus();
+      });
+      document.getElementById("activityOpen").addEventListener("click",function () {
+        if(!activityTarget || !cards[activityTarget])return;
+        if(filter !== "all" && cards[activityTarget].root.hidden){var all=document.getElementById("filter-all");if(all)all.click();}
+        selectGame(activityTarget,true,true);
       });
       document.getElementById("refreshLibrary").addEventListener("click", function () {
         if (!statusFresh || !state || !view.canRefresh(state,pending))return;

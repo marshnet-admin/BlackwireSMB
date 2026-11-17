@@ -2,6 +2,8 @@
 
 The ordinary builder produces the standalone web resident and embedded folder/PFS/PFSC reader as `Blackwire.elf`. It builds corresponding runtime/dependency source offline and does not install, load or contact a console. The native Dashboard interface and assets are excluded.
 
+> **Reader changes:** if a build's `reader/libSceAmpr.sprx` differs from the reader already installed in console games, pin the old reader first or every game must be reinstalled. See [Reader upgrades](READER-UPGRADES.md).
+
 ## Toolchain
 
 Use Linux or WSL with Python 3.10+, CMake/Make, LLVM 18 tools, and the public [ps5-payload-sdk](https://github.com/ps5-payload-dev/sdk). Dependency and selected CRT/libc source are retained in the checkout; the public SDK toolchain/imports remain explicit external build inputs. Consult [SDK reference](../metadata/sdk-reference.json), [runtime instructions](../vendor/sdk-runtime/README.md) and [third-party notices](../THIRD_PARTY_NOTICES.md).

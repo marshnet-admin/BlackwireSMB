@@ -321,6 +321,9 @@ static void home_prepare_first_failure(struct home_prepare_failure *f,unsigned s
     if(!f->step){*f=(struct home_prepare_failure){step,where,detail,raw,error};
         bw_send_log("setup-failure","step=%u stage=%s detail=%s raw=%d errno=%d",step,where?where:"",detail?detail:"",raw,error);}
 }
+/* User-facing setup sub-step for the dashboard. Informational only: a job
+ * that is no longer running simply ignores it. */
+static void home_setup_note(struct bw_native_backend *p,const char *text){(void)bw_native_job_setup_message(&p->sending.token,text);}
 static int home_prepare_provision(struct bw_native_backend *p,const struct bw_native_prepared *prepared,unsigned *startup_invalid){
     if(startup_invalid)*startup_invalid=0;
     if(!prepared||prepared->state!=BW_PREPARED_VALID||(prepared->prepared_policy&&prepared->prepared_policy!=3)||
@@ -337,6 +340,7 @@ static int home_prepare_provision(struct bw_native_backend *p,const struct bw_na
     step_result=p->ops.nonce(p->opaque,run);
     if(step_result||!nonce_valid(run)||!strcmp(run,prepared->run)){
         home_prepare_first_failure(&first,2,"nonce","fresh setup identity unavailable",step_result,step_result?errno:0);goto done;}
+    home_setup_note(p,"Setup 1 of 4: checking the console is idle and the startup files are intact.");
     bw_send_log("setup-step","game=%s step=3",prepared->game);
     if((step_result=home_prepare_control(&h))){home_prepare_first_failure(&first,3,"initial-control","current setup authority refused",step_result,errno);goto done;}
     bw_send_log("setup-step","game=%s step=4",prepared->game);
@@ -357,6 +361,7 @@ static int home_prepare_provision(struct bw_native_backend *p,const struct bw_na
         home_prepare_first_failure(&first,6,"source-generation",failure?failure:"sealed source module evidence unavailable",step_result,errno);goto done;}
     if((step_result=home_remove_stale_handoff(root))||(step_result=home_prepare_control(&h))){
         home_prepare_first_failure(&first,7,"stale-launch-inputs","leftover launch inputs could not be removed",step_result,errno);goto done;}
+    home_setup_note(p,"Setup 2 of 4: updating this game's in-game reader.");
     bw_send_log("setup-step","game=%s step=7",prepared->game);
     if((step_result=projected?bw_preload_bundle_upgrade_projection_controlled(&upgrade,&split,companions,&bundled):bw_preload_bundle_upgrade_source_controlled(&upgrade,&split,source_ampr,&bundled))){unknown|=bundled.release_unknown;
         home_prepare_first_failure(&first,7,bundled.stage?bundled.stage:"reader-bundle",bundled.reason?bundled.reason:"reader bundle refused",step_result,bundled.system_error);goto done;}
@@ -365,6 +370,7 @@ static int home_prepare_provision(struct bw_native_backend *p,const struct bw_na
     int began=bw_nrl_begin(&acquire,&owner,&acquired);if(began){unknown|=began==BW_NRC_RELEASE_UNCONFIRMED;
         home_prepare_first_failure(&first,8,acquired.stage?acquired.stage:"registration-owner",*acquired.registration_message?acquired.registration_message:acquired.detail?acquired.detail:acquired.reason?acquired.reason:"registration owner admission refused",began,acquired.error_snapshot);goto done;}
     struct bw_native_register_request registration={.data_root=backend_data_root,.apps=env.apps_root,.database=env.database,.identity=&h.identity,.selected=&h.selection,.current=home_prepare_control,.guard=&h,.startup=h.startup};
+    home_setup_note(p,"Setup 3 of 4: registering the game with ShadowMount and the PS5 library. A first registration can take several minutes.");
     bw_send_log("setup-step","game=%s step=9",prepared->game);
     struct bw_register_result checked={0};int registered=bw_native_register(&registration,&checked);
     bw_send_log("registration-result","result=%d cause=%s capabilities=%u observations=%u state=%d manual=%u post_result=%d add=%u scan=%u reattach=%u",registered,checked.cause?checked.cause:"none",checked.capabilities,checked.observations,checked.last_state,checked.last_manual,checked.last_post_result,checked.add_attempted,checked.scan_attempted,checked.reattach_attempted);
@@ -374,6 +380,7 @@ static int home_prepare_provision(struct bw_native_backend *p,const struct bw_na
     if(committed_status)home_prepare_first_failure(&first,10,committed.stage?committed.stage:"registration-commit",committed.detail?committed.detail:committed.reason?committed.reason:"ownership commit refused",committed_status,committed.error_snapshot);
     unknown|=committed_status==BW_NRC_RELEASE_UNCONFIRMED;
     if(registered||committed_status)goto done;
+    home_setup_note(p,"Setup 4 of 4: final checks.");
     bw_send_log("setup-step","game=%s step=11",prepared->game);
     if((step_result=home_prepare_control(&h))){home_prepare_first_failure(&first,11,"final-control","current setup authority refused",step_result,errno);goto done;}result=0;
 done:;

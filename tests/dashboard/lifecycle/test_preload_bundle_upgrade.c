@@ -109,6 +109,9 @@ int main(int argc,char **argv){CHECK(argc==2);char file[2048];struct bw_preload_
  uint8_t beta2_hash[32];CHECK(!pb_hex("39cc8ff48a8b53886be0f7c5f1d43bc504fb989c00a9adc050dcade72865c441",beta2_hash));
  CHECK(pu_previous_match(843696,beta2_hash));CHECK(!pu_previous_match(843695,beta2_hash));CHECK(!pu_previous_match(843697,beta2_hash));
  beta2_hash[0]^=1;CHECK(!pu_previous_match(843696,beta2_hash));
+ uint8_t fw8_hash[32];CHECK(!pb_hex("3f68bee76f507878cd3e083a8b49ebb39932dd5f360329321bbc5614178e87e2",fw8_hash));
+ CHECK(pu_previous_match(889232,fw8_hash));CHECK(!pu_previous_match(889231,fw8_hash));CHECK(!pu_previous_match(889233,fw8_hash));
+ fw8_hash[0]^=1;CHECK(!pu_previous_match(889232,fw8_hash));
  struct bw_preload_bundle_upgrade_request q=fixture(argv[1],0);CHECK(!bw_preload_bundle_upgrade_workspace(q.data_root,q.game));execute(&q,0,1);CHECK(access(workspace,F_OK)<0&&errno==ENOENT);CHECK(!bw_preload_bundle_upgrade_workspace(q.data_root,q.game));CHECK(!bw_preload_bundle_verify_checked(&q.bundle,&r));
  q=fixture(argv[1],1);struct stat before,after;joined_path(file,current_root,"fakelib2/libSceAmpr.sprx");CHECK(!lstat(file,&before));execute(&q,0,1);CHECK(!lstat(file,&after)&&pb_same(&before,&after));
  /* Reader-only owned installations migrate without any global pack. */

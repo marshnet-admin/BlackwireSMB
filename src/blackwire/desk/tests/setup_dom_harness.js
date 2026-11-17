@@ -65,6 +65,7 @@ function createPage(states, port='5918', hash='', dashboardStates=null, options=
         assert(states.length,'Unexpected status poll');const value=states.shift();
         return value instanceof Error ? Promise.reject(value) : Promise.resolve(reply(value));
       }
+      if(url==='/api/media/public-sdk-status')return Promise.resolve(reply({titleId:'PSBW50001',phase:'verified',running:false,registered:true,reason:'own_row_observed',detail:''}));
       if(url==='/api/dashboard/library') {
         if(!dashboardStates)return Promise.resolve(reply(catalog()));
         assert(dashboardStates.length,'Unexpected dashboard poll');const value=dashboardStates.shift();

@@ -41,11 +41,16 @@ const std::atomic<bool> *job_cancel{};
 // two forward reads of the same file; one bounded step runs per idle check.
 constexpr unsigned kPrefetchStreams=4;
 constexpr uint64_t kPrefetchAhead=8u*1024u*1024u,kPrefetchStep=256u*1024u,kPrefetchGap=1024u*1024u;
+// Long sequential readers (video, audio banks, streamed levels) earn a larger
+// lead. The total lead across streams stays well inside the 64 MiB block
+// cache so prefetched data cannot evict blocks the game still needs.
+constexpr uint64_t kPrefetchLong=16u*1024u*1024u,kPrefetchLonger=24u*1024u*1024u,kPrefetchBudget=40u*1024u*1024u;
+constexpr unsigned kPrefetchLongHits=16,kPrefetchLongerHits=48;
 struct PrefetchStream {uint32_t id{};uint64_t next{},ahead{},used{};unsigned hits{};bool active{},done{};};
 PrefetchStream prefetch_streams[kPrefetchStreams]{};
 uint64_t prefetch_clock{};
 alignas(64) static uint8_t prefetch_buffer[kPrefetchStep];
-struct GameReadStats {uint64_t reads{},bytes{},ns{},prefetch_steps{},prefetch_bytes{},prefetch_ns{};} game_stats{};
+struct GameReadStats {uint64_t reads{},bytes{},ns{},prefetch_steps{},prefetch_bytes{},prefetch_ns{},prefetch_long_steps{};} game_stats{};
 static uint64_t monotonic_ns(){struct timespec t{};return clock_gettime(CLOCK_MONOTONIC,&t)||t.tv_sec<0?0:(uint64_t)t.tv_sec*1000000000u+(uint64_t)t.tv_nsec;}
 // Per-request latency, keyed by scheduler class (0 small, 1 medium, 2 large).
 // Histogram bin i holds [2^i,2^(i+1)) microseconds; percentiles report upper bounds.
@@ -403,10 +408,10 @@ static void bp_runtime_source_progress(void*,const struct bp_source_progress *d,
             (unsigned long long)p->close.nanoseconds,(unsigned long long)p->pread.nanoseconds,(unsigned long long)p->read.nanoseconds,
             (unsigned long long)p->read_cpu_ns,(unsigned long long)p->pread_cpu_ns,(unsigned long long)p->poll_wait_ns,
             (unsigned long long)p->service_wall_ns,(unsigned long long)p->service_cpu_ns);
-        sce::Ampr::Emu::kernelDebugLogf("[BWREAD_PREFETCH1] gameReads=%llu gameBytes=%llu gameNs=%llu steps=%llu bytes=%llu ns=%llu rcvbuf=%llu",
+        sce::Ampr::Emu::kernelDebugLogf("[BWREAD_PREFETCH1] gameReads=%llu gameBytes=%llu gameNs=%llu steps=%llu bytes=%llu ns=%llu longSteps=%llu rcvbuf=%llu",
             (unsigned long long)game_stats.reads,(unsigned long long)game_stats.bytes,(unsigned long long)game_stats.ns,
             (unsigned long long)game_stats.prefetch_steps,(unsigned long long)game_stats.prefetch_bytes,(unsigned long long)game_stats.prefetch_ns,
-            (unsigned long long)p->socket_rcvbuf);
+            (unsigned long long)game_stats.prefetch_long_steps,(unsigned long long)p->socket_rcvbuf);
     }
     errno=saved;
 }
@@ -485,10 +490,16 @@ int64_t bp_runtime_read(uint32_t id,uint64_t at,void *out,size_t size,const std:
     }
     return result;
 }
+static uint64_t prefetch_window(const PrefetchStream& s){
+    return s.hits>=kPrefetchLongerHits?kPrefetchLonger:s.hits>=kPrefetchLongHits?kPrefetchLong:kPrefetchAhead;
+}
 static PrefetchStream *prefetch_candidate(){
     if(!bp_runtime_ready()||!first_read.emitted)return nullptr;
+    uint64_t lead=0;
+    for(auto& s:prefetch_streams)if(s.active&&!s.done&&s.ahead>s.next)lead+=s.ahead-s.next;
+    if(lead>=kPrefetchBudget)return nullptr;
     PrefetchStream *best=nullptr;
-    for(auto& s:prefetch_streams)if(s.active&&!s.done&&s.hits>=2&&s.ahead<s.next+kPrefetchAhead&&(!best||s.ahead-s.next<best->ahead-best->next))best=&s;
+    for(auto& s:prefetch_streams)if(s.active&&!s.done&&s.hits>=2&&s.ahead<s.next+prefetch_window(s)&&(!best||s.ahead-s.next<best->ahead-best->next))best=&s;
     return best;
 }
 bool bp_runtime_prefetch_pending(){AmprLockGuard guard(primary_mutex());return prefetch_candidate()!=nullptr;}
@@ -498,7 +509,7 @@ void bp_runtime_prefetch_step(){
     uint64_t began=monotonic_ns();job_cancel=nullptr;
     int64_t got=bp_source_read(source,s->id,s->ahead,prefetch_buffer,kPrefetchStep);
     uint64_t ended=monotonic_ns();if(ended>=began&&began)game_stats.prefetch_ns+=ended-began;
-    game_stats.prefetch_steps++;
+    game_stats.prefetch_steps++;if(s->ahead>=s->next+kPrefetchAhead)game_stats.prefetch_long_steps++;
     if(got>0){s->ahead+=(uint64_t)got;game_stats.prefetch_bytes+=(uint64_t)got;}else s->done=true;
 }
 uint64_t bp_runtime_now_ns(){return monotonic_ns();}

@@ -579,8 +579,15 @@ static const struct pb_pin pu_two_sources_dev6={"libSceAmpr.sprx",831168,
  * source scope can widen migration or destructive removal authority. */
 static const struct pb_pin pu_beta03_2={"libSceAmpr.sprx",843696,
     "39cc8ff48a8b53886be0f7c5f1d43bc504fb989c00a9adc050dcade72865c441"};
+/* Exact firmware 8.00 fork reader installed by commits 27c52ee..8818a3f
+ * (fw8-dev-34/35/36 builds). Pinned so later reader changes upgrade these
+ * games in place instead of refusing with reader_upgrade_predecessor_unknown.
+ * See docs/READER-UPGRADES.md: every reader change must pin the reader it
+ * replaces before it is loaded on the console. */
+static const struct pb_pin pu_fw8_fork1={"libSceAmpr.sprx",889232,
+    "3f68bee76f507878cd3e083a8b49ebb39932dd5f360329321bbc5614178e87e2"};
 static int pu_previous_match(uint64_t size,const uint8_t actual[32]){
-    const struct pb_pin *known[]={&pu_previous,&pu_public07,&pu_public09,&pu_public10a,&pu_live10a,&pu_reference348,&pu_home7944,&pu_home_diag7c,&pu_standalone_preview1,&pu_compressed_dev2,&pu_compressed_dev3,&pu_compressed_dev5,&pu_two_sources_dev6,&pu_beta03_2};uint8_t expected[32];
+    const struct pb_pin *known[]={&pu_previous,&pu_public07,&pu_public09,&pu_public10a,&pu_live10a,&pu_reference348,&pu_home7944,&pu_home_diag7c,&pu_standalone_preview1,&pu_compressed_dev2,&pu_compressed_dev3,&pu_compressed_dev5,&pu_two_sources_dev6,&pu_beta03_2,&pu_fw8_fork1};uint8_t expected[32];
     for(unsigned i=0;i<sizeof known/sizeof known[0];i++)
         if(size==known[i]->size&&!pb_hex(known[i]->hex,expected)&&!memcmp(actual,expected,32))return 1;
     return 0;

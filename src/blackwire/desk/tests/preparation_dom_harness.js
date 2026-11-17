@@ -54,11 +54,18 @@ async function check() {
   assert.strictEqual(app.get('preparationTrack').getAttribute('aria-valuenow'),'50');
   assert(app.get('preparationDetail').textContent.includes('2 / 4 files'));
   assert(app.get('preparationDetail').textContent.includes('1.0 / 2.0 MiB'));
+  assert.strictEqual(app.get('preparationStepLabel').textContent,'Step 3 of 6 · Copying startup files');assert(!app.get('preparationStepLabel').hidden);
+  assert(app.get('activityBar').hidden,'The hero already shows this preparation');
+  const pill=title=>{const card=app.get('games').children.find(item=>descendants(item).some(n=>n.className==='card-title'&&n.textContent===title));
+    return descendants(card).find(n=>n.className==='state-pill');};
+  assert.strictEqual(pill('Preserved Game').textContent,'Preparing 50%');assert.strictEqual(pill('Another Game').textContent,'Not sent');
   assert.strictEqual(button(app,'Preserved Game','Preparing…').getAttribute('aria-disabled'),'true');
   assert(content(details(app,'Another Game')).includes('Preparing Preserved Game'));
   // The app keeps rendering and browsing while the first job is active.
   choose(app,'Another Game');const otherSend=app.get('heroPrimary');otherSend.click();
   assert.strictEqual(app.postCount(),1);assert.strictEqual(otherSend.getAttribute('aria-disabled'),'true');assert(app.get('preparationStatus').hidden,'Other-source progress must not become a global notification');
+  assert(!app.get('activityBar').hidden,'Pinned activity keeps the active Send visible');
+  assert(app.get('activityTitle').textContent.includes('Preserved Game'));assert(app.get('activityDetail').textContent.includes('Step 3 of 6'));assert(!app.get('activityOpen').hidden);
   app.get('search').focus();await app.poll();
   assert.strictEqual(app.focused(),app.get('search'));assert(app.get('preparationDetail').textContent.includes('Verifying the game index'));
   assert.strictEqual(app.get('preparationStatus').getAttribute('data-state'),'preparing');

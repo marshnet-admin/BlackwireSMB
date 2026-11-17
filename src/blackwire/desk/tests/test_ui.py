@@ -114,6 +114,51 @@ const rows=ui.libraryGames(s);for(const row of rows){const a=ui.actions(row,s,nu
 assert.strictEqual(ui.actions(rows[0],s,null).prepareLabel,'Preparing…');assert.strictEqual(ui.actions(rows[0],s,null).badge,'Preparing files');
 ''')
 
+    def test_preparation_reports_overall_step_and_setup_activity(self):
+        self.preparation_behavior('''
+let panel=ui.preparationPanel(s,null);assert.strictEqual(JSON.stringify(panel.step),JSON.stringify({index:3,total:6,label:'Copying startup files'}));
+assert.strictEqual(panel.activity,'');assert.strictEqual(panel.setup,false);assert.strictEqual(panel.bytesTotal,10485760);
+Object.assign(c.operation.preparation,{phase:12,message:'Setup: registering this game with ShadowMount and the PS5 library.'});s.dashboard=ui.dashboardLibrary(c);
+panel=ui.preparationPanel(s,null);assert.strictEqual(panel.step.index,6);assert(panel.setup);assert.strictEqual(panel.message,'Setting up the reader and PS5 dashboard icon');
+assert.strictEqual(panel.activity,'Setup: registering this game with ShadowMount and the PS5 library.');
+Object.assign(c.operation.preparation,{phase:1,message:'Scanning PC files: 120 entries checked.',files:0,filesTotal:0,bytes:0,bytesTotal:0});s.dashboard=ui.dashboardLibrary(c);
+panel=ui.preparationPanel(s,null);assert.strictEqual(panel.step.index,1);assert.strictEqual(panel.activity,'120 entries checked');
+''')
+
+    def test_transfer_estimate_and_labels_need_real_measured_progress(self):
+        self.behavior('''
+assert.strictEqual(ui.transferEstimate([],100),null);assert.strictEqual(ui.transferEstimate([{t:0,bytes:0},{t:1000,bytes:10}],100),null);
+assert.strictEqual(ui.transferEstimate([{t:0,bytes:5},{t:5000,bytes:5}],100),null);
+const e=ui.transferEstimate([{t:0,bytes:0},{t:4000,bytes:4*1048576}],10*1048576);assert.strictEqual(e.rate,1048576);assert.strictEqual(e.seconds,6);
+const w=ui.transferEstimate([{t:0,bytes:0},{t:10000,bytes:0},{t:30000,bytes:20*1048576}],40*1048576);assert.strictEqual(w.rate,1048576);
+assert.strictEqual(ui.rateLabel(1048576*12.4),'12 MiB/s');assert.strictEqual(ui.rateLabel(1048576*2.25),'2.3 MiB/s');assert.strictEqual(ui.rateLabel(0),'');
+assert.strictEqual(ui.remainingLabel(30),'under a minute left');assert.strictEqual(ui.remainingLabel(600),'about 10 min left');assert.strictEqual(ui.remainingLabel(3900),'about 1 h 5 min left');
+assert.strictEqual(ui.clockLabel(65000),'1:05');assert.strictEqual(ui.clockLabel(3723000),'1:02:03');assert.strictEqual(ui.clockLabel(-1),'');
+''')
+
+    def test_known_reasons_are_explained_and_keep_technical_detail(self):
+        self.behavior('''
+let r=ui.explainReason('prepare refused reason=invalid_or_overbudget_source_plan');assert(r.text.includes('could not be planned'));assert(r.technical.includes('invalid_or_overbudget_source_plan'));
+r=ui.explainReason('Startup files kept. Setup step 9 (registration): ShadowMount timed out (raw=-1 errnoSnapshot=0).');assert(r.text.includes('step 9'));assert(r.text.includes('ShadowMount timed out'));assert(r.technical.startsWith('Startup files kept.'));
+r=ui.explainReason('PC connection was lost.');assert.strictEqual(r.text,'PC connection was lost.');assert.strictEqual(r.technical,'');
+assert.strictEqual(JSON.stringify(ui.explainReason('')),JSON.stringify({text:'',technical:''}));
+assert(ui.failureMessage('x reason=reader_upgrade_predecessor_unknown').includes('does not match the reader'));
+''')
+
+    def test_disabled_refresh_always_has_a_reason_and_media_status_is_labeled(self):
+        self.behavior('''
+const s={backend:'native',games:[],jobs:[],stream:{phase:'stopped'},library:{phase:'ready'},setup:{busy:false}};
+assert.strictEqual(ui.refreshReason(s,null),'');assert(ui.canRefresh(s,null));
+assert(ui.refreshReason(s,{action:'send'}).includes('current request'));
+s.library.phase='scanning';assert(!ui.canRefresh(s,null));assert(ui.refreshReason(s,null).includes('scanned'));s.library.phase='ready';
+s.setup.busy=true;assert(ui.refreshReason(s,null).includes('Settings'));
+assert.strictEqual(ui.mediaStatusLabel({phase:'verified',registered:true}).kind,'ok');
+const bad=ui.mediaStatusLabel({phase:'refused',registered:false,running:false,reason:'other_application_not_registered',detail:'NPXS40172 errno=0'});
+assert.strictEqual(bad.kind,'bad');assert(bad.text.includes('NPXS40172'));assert.strictEqual(ui.mediaStatusLabel(null).kind,'muted');
+assert.strictEqual(ui.sessionSummary({networkBytes:0,elapsedMs:10}),null);
+assert.strictEqual(ui.sessionSummary({networkBytes:2097152,elapsedMs:2000}).rate,1048576);
+''')
+
     def test_scanning_unknown_totals_and_unobserved_progress_are_not_fake_completion(self):
         self.preparation_behavior('''
 Object.assign(preparation,{phase:1,files:0,filesTotal:0,bytes:0,bytesTotal:0});

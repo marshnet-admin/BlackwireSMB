@@ -49,7 +49,7 @@ def main():
     globals_dir=out/'globals';globals_dir.mkdir()
     for name,body in zip(names,bodies):(globals_dir/name).write_bytes(body)
     unit=out/'unit';(unit/'library').mkdir(parents=True);(unit/'streamreader').mkdir()
-    for name in ('copy_fs.h','copy_sha256.h','manifest.h'):
+    for name in ('copy_fs.h','copy_sha256.h','manifest.h','lifecycle.h'):
         p=STREAM/name;(unit/'streamreader'/name).write_bytes(p.read_bytes());used.add(p)
     playgo=[bytes((i*(v+7)+v+19)%251 for i in range(1103+v*137)) for v in range(4)]
     for v,body in enumerate(playgo):(globals_dir/('playgo-%d.sprx'%v)).write_bytes(body)
