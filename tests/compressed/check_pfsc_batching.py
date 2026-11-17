@@ -17,7 +17,7 @@ def main():
         temp=Path(work)
         compressible=b''.join(bytes((i+j)%251 for j in range(65536)) for i in range(16))
         incompressible=random.Random(41491).randbytes(1024*1024)
-        for label,body,calls in [('compressed',compressible,1),('stored',incompressible,4)]:
+        for label,body,calls in [('compressed',compressible,1),('stored',incompressible,1)]:
             image=temp/(label+'.pfsc');original=temp/(label+'.bin');image.write_bytes(pfsc(body));original.write_bytes(body)
             result=subprocess.run([str(exe),str(image),str(original),str(calls)],capture_output=True,
                 env=dict(os.environ,ASAN_OPTIONS='halt_on_error=1:detect_leaks=1',UBSAN_OPTIONS='halt_on_error=1'))

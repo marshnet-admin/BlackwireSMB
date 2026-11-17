@@ -8,7 +8,7 @@
 #define BW_PFSC_TABLE_PAGE 4096u
 #define BW_PFSC_MAX_READ (1024u * 1024u)
 #ifndef BW_PFSC_READAHEAD
-#define BW_PFSC_READAHEAD (256u * 1024u)
+#define BW_PFSC_READAHEAD (1024u * 1024u)
 #endif
 #if BW_PFSC_READAHEAD > BW_PFSC_MAX_READ
 #error "PFSC read-ahead must fit one bounded source operation"

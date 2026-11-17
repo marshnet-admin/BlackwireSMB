@@ -305,7 +305,7 @@ def build(root, out, sdk, source, dependency, runner, jobs, runtime):
     text += "\nCOMMON_FLAGS += " + mapping_flags + "\nCXXFLAGS += " + mapping_flags + "\nCRT_CFLAGS += " + mapping_flags + "\n"
     text += '''
 # Source-owned FOLDER reader: explicit worker/cache ownership and no index rebuild.
-CXXFLAGS += -DAMPR_EMU_APP0_INDEX_AUTOBUILD=0 -DAMPR_EMU_PACK_WORKERS=1 -DAMPR_EMU_PACK_WORKER_CAPACITY=1 -DAMPR_EMU_PACK_DECODED_CACHE_BYTES=0 -DAMPR_EMU_PACK_PHYSICAL_CACHE_BYTES=0
+CXXFLAGS += -DAMPR_EMU_APP0_INDEX_AUTOBUILD=0 -DAMPR_EMU_PACK_WORKERS=2 -DAMPR_EMU_PACK_WORKER_CAPACITY=2 -DAMPR_EMU_PACK_LATENCY_RESERVE_WORKERS=1 -DAMPR_EMU_PACK_DECODED_CACHE_BYTES=0 -DAMPR_EMU_PACK_PHYSICAL_CACHE_BYTES=0
 $(OBJ)/src/runtime.o: CXXFLAGS += -Wall -Wextra -Werror
 $(OBJ)/bw/%.o: bw/%.c $(BUILD_MAKEFILE) $(BUILD_CONFIG)
 \t@mkdir -p $(dir $@)

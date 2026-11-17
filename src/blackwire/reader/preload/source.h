@@ -39,6 +39,8 @@ struct bp_source_performance {
     uint64_t payload_bytes,cache_hits,cache_misses,cache_evictions,cache_resident;
     uint64_t coalesced_runs,coalesced_blocks,scratch_bytes,largest_pread_request,clock_failures;
     struct bp_io_performance named_stat,held_stat,open,close,pread,read;
+    uint64_t read_cpu_ns,pread_cpu_ns,poll_wait_ns,service_wall_ns,service_cpu_ns; /* worker thread CPU time; wall time in poll and smb2_service */
+    uint64_t socket_rcvbuf; /* granted SO_RCVBUF after the first socket wait */
 };
 enum bp_source_stage {
     BP_SOURCE_NONE=0,BP_SOURCE_ENTRY_NAMED=1,BP_SOURCE_OPEN=2,BP_SOURCE_ENTRY_HELD=3,
@@ -137,6 +139,8 @@ int bp_source_disconnect(struct bp_source *); /* worker: drain transport/cache, 
 int bp_source_close(struct bp_source *); /* only after all worker reads drain */
 uint64_t bp_source_network_bytes(const struct bp_source *);
 uint64_t bp_source_cache_hits(const struct bp_source *);
+/* Immutable map lookup: copies the relative path of a map id, truncated to size. */
+int bp_source_path(const struct bp_source *,uint32_t,char *,size_t);
 /* Same worker only; snapshot before disconnect destroys cache counters. */
 void bp_source_performance(const struct bp_source *,struct bp_source_performance *);
 #ifdef __cplusplus

@@ -17,6 +17,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <poll.h>
+#include <sys/socket.h>
 /* Experimental source-only policy. Default STRICT retains every per-read
  * metadata fence. ON_OPEN assumes shared files remain immutable for the whole
  * open-handle lifetime: it does not detect in-place edits/path replacement on
@@ -57,6 +58,11 @@ static int perf_now(struct bp_source *p,uint64_t *out){
     *out=(uint64_t)stamp.tv_sec*1000000000u+(uint64_t)stamp.tv_nsec;return 0;
 }
 struct bp_stamp {uint64_t start;int valid;};
+static uint64_t thread_cpu_ns(void){
+    int saved=errno;struct timespec t;int rc=clock_gettime(CLOCK_THREAD_CPUTIME_ID,&t);errno=saved;
+    return rc||t.tv_sec<0||t.tv_nsec<0?0:(uint64_t)t.tv_sec*1000000000u+(uint64_t)t.tv_nsec;
+}
+static void cpu_add(uint64_t *total,uint64_t start){uint64_t end=thread_cpu_ns();if(start&&end>=start)count(total,end-start);}
 static struct bp_stamp perf_begin(struct bp_source *p,struct bp_io_performance *op){
     struct bp_stamp stamp={0,0};count(&op->calls,1);stamp.valid=!perf_now(p,&stamp.start);return stamp;
 }
@@ -183,31 +189,89 @@ static int remote_path(struct bp_source *p,uint32_t id,char out[2048],struct bw_
     int n=snprintf(out,2048,"%s/%s",p->binding.source,row->path);return n<0||n>=2048?-1:0;
 }
 /* Container metadata and decoded blocks share this DATA worker's exact image
- * handle. Remote generation checks bracket the entire logical read, including
- * cache hits. Decoder callbacks check cancellation in RAM between bounded
- * payload calls; they do not multiply SMB stat requests for each PFSC block. */
+ * handle. Remote generation is verified when the image is first opened; later
+ * reads assume the image stays immutable and check only RAM session state. */
 static int image_current(void *opaque){
     struct bp_source *p=opaque;
     if(!p||p->failed||!p->ready||!p->smb||!p->current)return -1;
     return p->current(p->opaque)?BW_CONTAINER_CANCELED:0;
 }
+#define BP_PREAD_CHUNK (256u*1024u)
+#define BP_PREAD_DEPTH (BW_PFSC_MAX_READ/BP_PREAD_CHUNK)
+#define BP_PREAD_INFLIGHT 1u
+#define BP_SOCKET_RCVBUF (4*1024*1024)
+static void socket_tune(struct bp_source *p,int fd){
+    if(p->performance.socket_rcvbuf)return;
+    int saved=errno,want=BP_SOCKET_RCVBUF,got=0;socklen_t size=sizeof got;
+    (void)setsockopt(fd,SOL_SOCKET,SO_RCVBUF,&want,sizeof want);
+    p->performance.socket_rcvbuf=!getsockopt(fd,SOL_SOCKET,SO_RCVBUF,&got,&size)&&got>0?(uint64_t)got:1;
+    errno=saved;
+}
+/* Callbacks record results only; destinations stay on this stack until every
+ * submitted read completes or SAME-worker poison destroys the context. */
+struct bp_pread_op {uint64_t at;uint32_t want;int busy,done,status,error;};
+static void pread_done(struct smb2_context *smb,int status,void *data,void *opaque){
+    (void)smb;(void)data;struct bp_pread_op *op=opaque;int error=errno;
+    if(op->done)return;op->status=status;op->error=error;op->done=1;errno=error;
+}
 static int image_payload(void *opaque,uint64_t at,void *output,size_t size){
     struct bp_source *p=opaque;struct bp_handle *h=&p->handles[0];
     int state=image_current(p);if(state)return state;
     if(!h->fh||size>BW_PFSC_MAX_READ||at>h->admitted.smb2_size||size>h->admitted.smb2_size-at)return -1;
-    uint32_t maximum=smb2_get_max_read_size(p->smb);if(!maximum)return poison(p,BP_SOURCE_MAX_READ);
-    for(size_t done=0;done<size;){
-        state=image_current(p);if(state)return state;
-        uint32_t want=(uint32_t)(size-done);if(want>maximum)want=maximum;
-        if(want>p->performance.largest_pread_request)p->performance.largest_pread_request=want;
-        progress_begin(p,BP_SOURCE_PREAD);struct bp_stamp stamp=perf_begin(p,&p->performance.pread);
-        int got=smb2_pread(p->smb,h->fh,(uint8_t *)output+done,want,at+done);int error=errno;
-        perf_end(p,&p->performance.pread,stamp);progress_end(p,got,error,got<=0||(uint32_t)got>want);errno=error;
-        if(got<=0||(uint32_t)got>want)return poison(p,BP_SOURCE_PREAD);
-        if((uint64_t)got>UINT64_MAX-p->network)return poison(p,BP_SOURCE_COUNTER);
-        p->network+=(uint64_t)got;done+=(size_t)got;
+    uint32_t chunk=smb2_get_max_read_size(p->smb);if(!chunk)return poison(p,BP_SOURCE_MAX_READ);
+    if(chunk>BP_PREAD_CHUNK)chunk=BP_PREAD_CHUNK;
+    struct bp_pread_op ops[BP_PREAD_DEPTH];memset(ops,0,sizeof ops);
+    uint8_t *out=output;size_t issued=0;unsigned inflight=0,submitted=0;int stop=0,raw=0,error=0;
+    progress_begin(p,BP_SOURCE_PREAD);struct bp_stamp stamp=perf_begin(p,&p->performance.pread);uint64_t cpu=thread_cpu_ns();
+    for(;;){
+        if(!stop&&image_current(p))stop=1;
+        for(unsigned i=0;!stop&&i<BP_PREAD_DEPTH&&inflight<BP_PREAD_INFLIGHT&&issued<size;i++){
+            if(ops[i].busy)continue;
+            uint32_t want=size-issued<chunk?(uint32_t)(size-issued):chunk;
+            if(want>p->performance.largest_pread_request)p->performance.largest_pread_request=want;
+            ops[i]=(struct bp_pread_op){.at=issued,.want=want,.busy=1};
+            raw=smb2_pread_async(p->smb,h->fh,out+issued,want,at+issued,pread_done,&ops[i]);error=errno;
+            if(raw<0){ops[i].busy=0;goto fail;}
+            issued+=want;inflight++;submitted++;
+        }
+        if(!inflight)break;
+        int waiting=0;for(unsigned i=0;i<BP_PREAD_DEPTH;i++)if(ops[i].busy&&!ops[i].done)waiting=1;
+        if(waiting){
+            struct pollfd fd={smb2_get_fd(p->smb),(short)smb2_which_events(p->smb),0};
+            if(fd.fd<0){raw=-1;error=EIO;goto fail;}
+            socket_tune(p,fd.fd);
+            uint64_t waited=0;int timed=!perf_now(p,&waited);
+            raw=poll(&fd,1,250);error=errno;
+            uint64_t woke;if(timed&&!perf_now(p,&woke)&&woke>=waited)count(&p->performance.poll_wait_ns,woke-waited);
+            if(raw<0&&error==EINTR)continue;
+            if(raw<0)goto fail;
+            uint64_t serve_at=0,serve_cpu=thread_cpu_ns();int serve_timed=!perf_now(p,&serve_at);
+            raw=smb2_service(p->smb,raw?fd.revents:0);error=errno;
+            uint64_t served;if(serve_timed&&!perf_now(p,&served)&&served>=serve_at)count(&p->performance.service_wall_ns,served-serve_at);
+            cpu_add(&p->performance.service_cpu_ns,serve_cpu);errno=error;
+            if(raw<0)goto fail;
+        }
+        for(unsigned i=0;i<BP_PREAD_DEPTH;i++){
+            struct bp_pread_op *op=&ops[i];if(!op->busy||!op->done)continue;
+            op->busy=0;inflight--;raw=op->status;error=op->error;
+            if(raw<=0||(uint32_t)raw>op->want)goto fail;
+            if((uint64_t)raw>UINT64_MAX-p->network){perf_end(p,&p->performance.pread,stamp);progress_end(p,raw,0,1);return poison(p,BP_SOURCE_COUNTER);}
+            p->network+=(uint64_t)raw;
+            if((uint32_t)raw<op->want){
+                uint64_t rest=op->at+(uint64_t)raw;uint32_t want=op->want-(uint32_t)raw;
+                *op=(struct bp_pread_op){.at=rest,.want=want,.busy=1};
+                raw=smb2_pread_async(p->smb,h->fh,out+rest,want,at+rest,pread_done,op);error=errno;
+                if(raw<0){op->busy=0;goto fail;}
+                inflight++;submitted++;
+            }
+        }
     }
+    if(submitted>1)count(&p->performance.pread.calls,submitted-1);
+    perf_end(p,&p->performance.pread,stamp);cpu_add(&p->performance.pread_cpu_ns,cpu);progress_end(p,(int64_t)issued,0,0);
     return image_current(p);
+fail:
+    perf_end(p,&p->performance.pread,stamp);cpu_add(&p->performance.pread_cpu_ns,cpu);progress_end(p,raw,error,1);errno=error;
+    return poison(p,BP_SOURCE_PREAD);
 }
 static int image_fence(struct bp_source *p,int final){
     struct bp_handle *h=&p->handles[0];struct smb2_stat_64 named,held;
@@ -246,7 +310,7 @@ static struct bp_handle *image_remote(struct bp_source *p,uint32_t id){
         if(result==BW_CONTAINER_CANCELED&&!p->failed)return image_open_canceled(p);
         if(result)return poison(p,BP_SOURCE_CONTAINER),NULL;
         if(image_fence(p,1))return image_current(p)==BW_CONTAINER_CANCELED?image_open_canceled(p):NULL;
-    }else if(image_fence(p,0))return NULL;
+    }else if(current(p))return NULL;
     h->id=id;return h;
 }
 static struct bp_handle *remote(struct bp_source *p,uint32_t id){
@@ -301,7 +365,7 @@ static int scope_current(const struct bp_read_scope *scope,uint32_t id){
 static int remote_finish(const struct bp_read_scope *scope){
     if(!scope||scope_current(scope,scope->id))return -1;
     struct bp_source *p=scope->source;
-    if(p->selected.source_kind==BW_PROVIDER_CONTAINER)return image_fence(p,1);
+    if(p->selected.source_kind==BW_PROVIDER_CONTAINER)return current(p);
 #if BP_METADATA_PROFILE == BP_METADATA_PROFILE_STRICT
     char path[2048];struct bw_manifest_record row;
     if(remote_path(p,scope->id,path,&row))return poison(p,BP_SOURCE_FINAL_PATH);
@@ -441,8 +505,9 @@ static int connect_source(struct bp_source *p,void *storage,size_t storage_size,
     smb2_set_timeout(p->smb,10);p->connect_diagnostic.options_returned++;
     smb2_set_user(p->smb,p->config.user);p->connect_diagnostic.options_returned++;
     smb2_set_password(p->smb,p->config.password);p->connect_diagnostic.options_returned++;
-    smb2_set_sign(p->smb,1);p->connect_diagnostic.options_returned++;
-    smb2_set_security_mode(p->smb,SMB2_NEGOTIATE_SIGNING_ENABLED|SMB2_NEGOTIATE_SIGNING_REQUIRED);p->connect_diagnostic.options_returned++;
+    /* Data-only session: signing is negotiated off unless the server requires it. */
+    smb2_set_sign(p->smb,0);p->connect_diagnostic.options_returned++;
+    smb2_set_security_mode(p->smb,SMB2_NEGOTIATE_SIGNING_ENABLED);p->connect_diagnostic.options_returned++;
     raw=smb2_connect_share(p->smb,p->config.server,p->config.share,p->config.user);error=errno;
     if(raw<0){
         connect_failure(p,BP_CONNECT_SHARE,raw,error);
@@ -518,9 +583,9 @@ static int64_t read_source_impl(struct bp_source *p,uint32_t id,uint64_t at,void
 static int64_t read_source(struct bp_source *p,uint32_t id,uint64_t at,void *output,size_t length,struct bp_read_witness *witness){
     if(!p)return read_source_impl(p,id,at,output,length,witness);
     count(&p->performance.reads,1);count(&p->performance.requested_bytes,length);
-    struct bp_stamp stamp=perf_begin(p,&p->performance.read);
+    struct bp_stamp stamp=perf_begin(p,&p->performance.read);uint64_t cpu=thread_cpu_ns();
     int64_t result=read_source_impl(p,id,at,output,length,witness);
-    perf_end(p,&p->performance.read,stamp);
+    perf_end(p,&p->performance.read,stamp);cpu_add(&p->performance.read_cpu_ns,cpu);
     if(result>0){count(&p->performance.completed_reads,1);count(&p->performance.completed_bytes,(uint64_t)result);}
     else if(result<0){
         count(&p->performance.failed_reads,1);if(result==-ECANCELED)count(&p->performance.canceled_reads,1);
@@ -550,6 +615,11 @@ int bp_source_worker_priority(const struct bp_source *p,int upstream){
     return p&&p->ready&&!p->failed&&p->selected.source_kind==BW_PROVIDER_CONTAINER?700:upstream;
 }
 uint64_t bp_source_cache_hits(const struct bp_source *p){return p?p->cache.hits:0;}
+int bp_source_path(const struct bp_source *p,uint32_t id,char *out,size_t size){
+    struct bw_manifest_record row;
+    if(!p||!out||!size||bw_manifest_get(&p->map,id,&row)||!row.path)return -1;
+    int n=snprintf(out,size,"%.*s",(int)row.path_length,row.path);return n<0?-1:0;
+}
 void bp_source_performance(const struct bp_source *p,struct bp_source_performance *out){
     if(!out)return;if(!p){memset(out,0,sizeof *out);return;}*out=p->performance;
     out->payload_bytes=p->network;out->cache_hits=p->cache.hits;out->cache_misses=p->cache.misses;

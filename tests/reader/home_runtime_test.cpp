@@ -31,6 +31,9 @@ enum {P_PLAY=100,P_HOME,P_MISSING,P_MODE,P_LARGE,P_CLOSE,P_REFUSED,P_CHANGED};
 struct bp_source {} fixture_source;static bp_source *source;
 static std::atomic<unsigned> status{0};static std::atomic<bool> metadata_ready{false};static std::atomic<bp_source*> cache_owner{nullptr};
 static int current(void*){return canceled.load()?-1:0;}
+/* Second DATA lane: admitted from the same inputs with its own guard. */
+struct bp_source fixture_lane;static bp_source *lane_source;static std::atomic<unsigned> lane_status{0};static unsigned lane_admitted;
+static int lane_current(void*){return canceled.load()?-1:0;}
 static int kind(const char *path){if(!std::strcmp(path,"/app0/blackwire.files"))return 1;if(std::strstr(path,".selection"))return 2;if(std::strstr(path,".share"))return 3;if(!std::strcmp(path,"/app0/fakelib2/blackwire-reader.projection"))return 4;CHECK(false);return 0;}
 static int fake_open(const char *path,int flags,...){
     CHECK(flags==(O_RDONLY|O_NOFOLLOW|O_NONBLOCK));unsigned k=(unsigned)kind(path);
@@ -91,13 +94,15 @@ extern "C" int bw_home_client_claim(int32_t pid,const uint8_t hash[32],uint64_t 
     if(scenario==CANCELED_HOME)canceled.store(true);
     std::memcpy(run,accepted_run,33);return 0;
 }
-static int bp_source_admit(bp_source **out,const void*,size_t,const void*,size_t,const void*,size_t,int(*guard)(void*),void *opaque){CHECK(!guard(opaque));admitted++;*out=&fixture_source;return 0;}
+static int bp_source_admit(bp_source **out,const void*,size_t,const void*,size_t,const void*,size_t,int(*guard)(void*),void *opaque){CHECK(!guard(opaque));
+    if(guard==lane_current){CHECK(admitted==1);lane_admitted++;*out=&fixture_lane;return 0;}admitted++;*out=&fixture_source;return 0;}
 /* DATA admission is a recording boundary here. Actual producer/codec/DATA
  * bytes are qualified separately; this checks C++ Input4 forwarding/failure. */
 static int bp_source_admit_projection(bp_source **out,const void *map,size_t map_size,const void *selected,size_t selected_size,const void *share,size_t share_size,const void *projection,size_t projection_size,int(*guard)(void*),void *opaque){
     CHECK(scenario>=100&&!guard(opaque));CHECK(map_size==sizeof map_bytes-1&&!std::memcmp(map,map_bytes,map_size));
     CHECK(selected_size==selection_size&&!std::memcmp(selected,selection_bytes,selected_size));CHECK(share_size==sizeof share_bytes-1&&!std::memcmp(share,share_bytes,share_size));
-    CHECK(projection_size==sizeof projection_bytes-1&&!std::memcmp(projection,projection_bytes,projection_size));admitted++;
+    CHECK(projection_size==sizeof projection_bytes-1&&!std::memcmp(projection,projection_bytes,projection_size));
+    if(guard==lane_current){CHECK(admitted==1);lane_admitted++;*out=&fixture_lane;return 0;}admitted++;
     if(scenario==P_REFUSED)return -1;*out=&fixture_source;return 0;
 }
 extern "C" void bw_home_client_diagnostic(struct bw_home_client_failure *out){getters++;*out={BW_HC_NONCE,1,-1,EPERM,0};}
@@ -116,7 +121,7 @@ static int bp_source_close(bp_source*){return 0;}
 static void reset(){
     claims=hashes=notifications=exits=logs=sleeps=opened=closed=admitted=claim_logs=getters=0;next_fd=3;tick=1000000u;claimed=changed=false;canceled.store(false);
     std::memset(fd_kind,0,sizeof fd_kind);std::memset(fd_live,0,sizeof fd_live);home_start={};home_notice=nullptr;home_exit=nullptr;private_wait={};init_failure={};
-    source=nullptr;status.store(0);metadata_ready.store(false);cache_owner.store(nullptr);
+    source=nullptr;status.store(0);metadata_ready.store(false);cache_owner.store(nullptr);lane_source=nullptr;lane_status.store(0);lane_admitted=0;
     struct bw_reader_selection selected{};std::strcpy(selected.source,"Fixture");std::strcpy(selected.title,"PPSA02325");
     std::memset(selected.binding_hex,'a',64);std::memset(selected.prepared_record_hex,'b',64);std::snprintf(selected.game,sizeof selected.game,"PPSA02325_%s",selected.binding_hex);
     std::strcpy(selected.run,scenario==WRONG_RUN?other_run:accepted_run);selected.source_kind=BW_PROVIDER_FOLDER;selected.source_policy=1;selected.eboot_size=32;selected.manifest_count=2;selected.manifest_hash=123;
@@ -127,6 +132,7 @@ int main(){
     for(scenario=0;scenario<LAST_SCENARIO;scenario++){
         reset();cases++;bool result=bp_metadata_prepare();bool success=scenario==PLAY||scenario==PLAY_WAIT||scenario==HOME;
         CHECK(result==success);CHECK(opened==closed);CHECK((admitted==1)==success);
+        CHECK(success?(lane_admitted==1&&lane_source==&fixture_lane&&lane_status.load()==2):(!lane_source&&lane_status.load()==0));
         bool home=scenario!=PLAY&&scenario!=PLAY_WAIT&&scenario!=PARTIAL&&scenario!=PARTIAL_DENIED&&scenario!=WRONG_MODE&&scenario!=IO_ERROR;
         CHECK(home_start.active==home);CHECK(claims<=1);
         if(scenario==CLAIM_REFUSED){CHECK(init_failure.operation==19&&init_failure.error==0);CHECK(claim_logs==1&&getters==1&&errno==EIO);CHECK(!bp_metadata_prepare()&&claim_logs==1&&claims==1);}
@@ -147,6 +153,7 @@ int main(){
         reset();cases++;bool result=bp_metadata_prepare();bool success=scenario==P_PLAY||scenario==P_HOME;
         CHECK(result==success&&opened==closed);CHECK(home_start.active==(scenario==P_HOME));CHECK(claims==(scenario==P_HOME?1u:0u));
         CHECK((admitted==1)==(success||scenario==P_REFUSED||scenario==P_CHANGED));
+        CHECK(success?(lane_admitted==1&&lane_source==&fixture_lane&&lane_status.load()==2):(!lane_admitted&&!lane_source&&lane_status.load()==0));
         if(success)CHECK(metadata_ready.load()&&bp_metadata_prepare());
         if(scenario==P_MISSING)CHECK(init_failure.input==4&&init_failure.operation==1&&init_failure.error==ENOENT&&!sleeps);
         if(scenario==P_MODE||scenario==P_LARGE)CHECK(init_failure.input==4&&init_failure.operation==3);

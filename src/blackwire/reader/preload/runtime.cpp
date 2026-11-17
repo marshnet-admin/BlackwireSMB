@@ -5,6 +5,8 @@
 #include "ampr_libkernel_hook.h"
 #include "ampr_debug_log.h"
 #include "ampr_emu_kernel_lookup.h"
+#include "ampr_emu_sync.h"
+#include "ampr_emu_runtime_memory.h"
 #include "../bw/streamreader/cache.h"
 #include <_kernel.h>
 #include <sys/dmem.h>
@@ -14,6 +16,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 extern "C" {
@@ -34,8 +37,100 @@ static std::atomic<bp_source*> cache_owner{nullptr};
 // Only the single source worker sets/reads this borrowed, in-flight job flag.
 // Existing pack ownership retains the job until its completion publication.
 const std::atomic<bool> *job_cancel{};
+// Idle read-ahead, owned by the single source worker. A stream qualifies after
+// two forward reads of the same file; one bounded step runs per idle check.
+constexpr unsigned kPrefetchStreams=4;
+constexpr uint64_t kPrefetchAhead=8u*1024u*1024u,kPrefetchStep=256u*1024u,kPrefetchGap=1024u*1024u;
+struct PrefetchStream {uint32_t id{};uint64_t next{},ahead{},used{};unsigned hits{};bool active{},done{};};
+PrefetchStream prefetch_streams[kPrefetchStreams]{};
+uint64_t prefetch_clock{};
+alignas(64) static uint8_t prefetch_buffer[kPrefetchStep];
+struct GameReadStats {uint64_t reads{},bytes{},ns{},prefetch_steps{},prefetch_bytes{},prefetch_ns{};} game_stats{};
+static uint64_t monotonic_ns(){struct timespec t{};return clock_gettime(CLOCK_MONOTONIC,&t)||t.tv_sec<0?0:(uint64_t)t.tv_sec*1000000000u+(uint64_t)t.tv_nsec;}
+// Per-request latency, keyed by scheduler class (0 small, 1 medium, 2 large).
+// Histogram bin i holds [2^i,2^(i+1)) microseconds; percentiles report upper bounds.
+constexpr unsigned kLatClasses=3,kLatPriorities=4,kLatBins=32,kLatFiles=128,kSizeBins=24;
+struct LatWindow {uint64_t n{},bytes{},bins[kLatBins]{},max_total{},max_queue{},max_service{},over16{},over33{},over100{},failed{};};
+struct LatFile {uint32_t id{};uint64_t reads{},bytes{},small_reads{},slow_small{},max_us{};bool used{};};
+struct LatState {
+    LatWindow window[kLatClasses]{},session[kLatClasses]{};
+    uint64_t prio_n[kLatPriorities]{},prio_slow[kLatPriorities]{};
+    uint64_t size_bins[kSizeBins]{},last_log{},windows{};uint32_t depth_peak{},session_depth_peak{};
+    LatFile files[kLatFiles]{};
+} lat{};
+static unsigned log2_bin(uint64_t v,unsigned limit){unsigned b=0;while(v>1&&b<limit-1){v>>=1;b++;}return b;}
+static unsigned long long lat_pct(const LatWindow& w,unsigned percent){
+    if(!w.n)return 0;uint64_t rank=(w.n*percent+99)/100,seen=0;
+    for(unsigned i=0;i<kLatBins;i++){seen+=w.bins[i];if(seen>=rank)return 1ull<<(i+1);}
+    return ~0ull;
+}
+static void lat_add(LatWindow& w,uint64_t bytes,uint64_t total,uint64_t queue,uint64_t service,bool failed){
+    w.n++;w.bytes+=bytes;w.bins[log2_bin(total,kLatBins)]++;
+    if(total>w.max_total)w.max_total=total;if(queue>w.max_queue)w.max_queue=queue;if(service>w.max_service)w.max_service=service;
+    w.over16+=total>16000;w.over33+=total>33000;w.over100+=total>100000;w.failed+=failed;
+}
+static void lat_log(const char *scope,const LatWindow (&set)[kLatClasses],uint32_t depth){
+    static const char *const names[kLatClasses]={"small","medium","large"};
+    for(unsigned c=0;c<kLatClasses;c++){
+        const LatWindow& w=set[c];if(!w.n)continue;
+        sce::Ampr::Emu::kernelDebugLogf("[BWREAD_LAT1] scope=%s cls=%s n=%llu kib=%llu p50us=%llu p95us=%llu p99us=%llu maxus=%llu qmaxus=%llu smaxus=%llu gt16=%llu gt33=%llu gt100=%llu failed=%llu depthPeak=%u",
+            scope,names[c],(unsigned long long)w.n,(unsigned long long)(w.bytes>>10),lat_pct(w,50),lat_pct(w,95),lat_pct(w,99),
+            (unsigned long long)w.max_total,(unsigned long long)w.max_queue,(unsigned long long)w.max_service,
+            (unsigned long long)w.over16,(unsigned long long)w.over33,(unsigned long long)w.over100,(unsigned long long)w.failed,depth);
+    }
+}
+static void lat_log_window(){
+    lat_log("window",lat.window,lat.depth_peak);
+    sce::Ampr::Emu::kernelDebugLogf("[BWREAD_LAT1] scope=priority n0=%llu slow0=%llu n1=%llu slow1=%llu n2=%llu slow2=%llu n3=%llu slow3=%llu",
+        (unsigned long long)lat.prio_n[0],(unsigned long long)lat.prio_slow[0],(unsigned long long)lat.prio_n[1],(unsigned long long)lat.prio_slow[1],
+        (unsigned long long)lat.prio_n[2],(unsigned long long)lat.prio_slow[2],(unsigned long long)lat.prio_n[3],(unsigned long long)lat.prio_slow[3]);
+    for(auto& w:lat.window)w=LatWindow{};
+    for(unsigned i=0;i<kLatPriorities;i++)lat.prio_n[i]=lat.prio_slow[i]=0;
+    lat.depth_peak=0;
+}
+static void lat_file(uint32_t id,uint64_t bytes,bool small,bool slow,uint64_t total){
+    LatFile *slot=nullptr,*victim=&lat.files[0];
+    for(auto& f:lat.files){if(f.used&&f.id==id){slot=&f;break;}if(!f.used||f.reads<victim->reads)victim=&f;}
+    if(!slot){slot=victim;*slot=LatFile{};slot->id=id;slot->used=true;}
+    slot->reads++;slot->bytes+=bytes;slot->small_reads+=small;slot->slow_small+=small&&slow;if(total>slot->max_us)slot->max_us=total;
+}
+static void lat_report_session(){
+    lat_log("session",lat.session,lat.session_depth_peak);
+    char sizes[400];int at=0;
+    for(unsigned i=12;i<kSizeBins&&at>=0&&at<(int)sizeof sizes;i++)
+        at+=snprintf(sizes+at,sizeof sizes-at," k%u=%llu",(1u<<i)>>10,(unsigned long long)lat.size_bins[i]);
+    sce::Ampr::Emu::kernelDebugLogf("[BWREAD_SIZE1] under4k=%llu%s",
+        (unsigned long long)(lat.size_bins[0]+lat.size_bins[1]+lat.size_bins[2]+lat.size_bins[3]+lat.size_bins[4]+lat.size_bins[5]+lat.size_bins[6]+lat.size_bins[7]+lat.size_bins[8]+lat.size_bins[9]+lat.size_bins[10]+lat.size_bins[11]),sizes);
+    bool reported[kLatFiles]{};
+    for(unsigned rank=0;rank<8;rank++){
+        int best=-1;
+        for(unsigned i=0;i<kLatFiles;i++){
+            const LatFile& f=lat.files[i];if(!f.used||reported[i])continue;
+            if(best<0||f.slow_small>lat.files[best].slow_small||(f.slow_small==lat.files[best].slow_small&&f.reads>lat.files[best].reads))best=(int)i;
+        }
+        if(best<0)break;reported[best]=true;const LatFile& f=lat.files[best];
+        char path[160];if(!source||bp_source_path(source,f.id,path,sizeof path))snprintf(path,sizeof path,"?");
+        sce::Ampr::Emu::kernelDebugLogf("[BWREAD_FILE1] rank=%u id=%u reads=%llu mib=%llu small=%llu slowSmall=%llu maxus=%llu path=%s",
+            rank,f.id,(unsigned long long)f.reads,(unsigned long long)(f.bytes>>20),(unsigned long long)f.small_reads,
+            (unsigned long long)f.slow_small,(unsigned long long)f.max_us,path);
+    }
+}
 struct Ops {int(*open)(const char*,int,...);int(*stat)(int,struct stat*);ssize_t(*pread)(int,void*,size_t,off_t);int(*close)(int);} ops{};
 int current(void*){return canceled.load()||(job_cancel&&job_cancel->load())? -1:0;}
+// Two pack workers share the primary source (large reads, read-ahead, first
+// read) under primary_mutex. The reserved small-read worker also owns a second
+// lane: its own source, SMB connection and heap cache, never touched by others.
+static AmprMutex& primary_mutex(){static AmprMutex m;return m;}
+static AmprMutex& lat_mutex(){static AmprMutex m;return m;}
+constexpr size_t kLaneCacheBytes=16u*1024u*1024u;
+constexpr uint32_t kNoWorker=UINT32_MAX;
+bp_source *lane_source{};
+std::atomic<unsigned> lane_status{0}; // 0 none, 2 admitted, 4 ready, 5 failed, 6 finished
+std::atomic<uint32_t> lane_owner{kNoWorker},primary_owner{kNoWorker};
+uint8_t *lane_storage{};
+const std::atomic<bool> *lane_cancel{}; // lane owner only
+int lane_current(void*){return canceled.load()||(lane_cancel&&lane_cancel->load())? -1:0;}
+struct LaneStats {uint64_t reads{},bytes{},ns{},fallbacks{},last_log{};} lane_stats{};
 // BP_INPUT_DIAGNOSTIC_BEGIN
 struct InitFailure {unsigned input{},operation{},field{};int64_t result{};int error{};uint64_t actual{},expected{};} init_failure{};
 static bool input_fail(unsigned input,unsigned operation,int64_t result,int error,unsigned field=0,uint64_t actual=0,uint64_t expected=0){
@@ -201,10 +296,13 @@ bool metadata_admit(Input& map,Input& selection,Input& share){
                 projection.bytes,projection.size,current,nullptr);int saved=errno;
             ok=result==0&&projection.stable()&&map.stable()&&selection.stable()&&share.stable()&&metadata_guard();
             if(result)input_fail(4,13,result,saved);
+            if(ok&&bp_source_admit_projection(&lane_source,map.bytes,map.size,selection.bytes,selection.size,share.bytes,share.size,
+                projection.bytes,projection.size,lane_current,nullptr))lane_source=nullptr;
         }
         bool closed=projection.clear();return ok&&closed;
     }
     int result=parsed?-1:bp_source_admit(&source,map.bytes,map.size,selection.bytes,selection.size,share.bytes,share.size,current,nullptr);int saved=errno;
+    if(result==0&&bp_source_admit(&lane_source,map.bytes,map.size,selection.bytes,selection.size,share.bytes,share.size,lane_current,nullptr))lane_source=nullptr;
     return result==0?true:input_fail(0,13,result,saved);
 }
 }
@@ -231,6 +329,8 @@ bool bp_metadata_prepare(){
     home_start.inputs_released=map_closed&&selection_closed&&share_closed&&!home_start.release_unknown;
     ok=ok&&map_closed&&selection_closed&&share_closed;
     if(!ok&&source){bp_source_close(source);source=nullptr;}
+    if(!ok&&lane_source){bp_source_close(lane_source);lane_source=nullptr;}
+    if(ok&&lane_source)lane_status.store(2);
     if(ok)metadata_ready.store(true);
     status.store(ok?2u:5u);return ok;
 }
@@ -296,11 +396,17 @@ static void bp_runtime_source_progress(void*,const struct bp_source_progress *d,
             (unsigned long long)d->sequence,d->stage,d->in_flight,(long long)d->raw,d->error_observed,d->poisoned,
             (unsigned long long)p->reads,(unsigned long long)p->completed_reads,(unsigned long long)p->failed_reads,(unsigned long long)p->requested_bytes,
             (unsigned long long)p->completed_bytes,(unsigned long long)p->payload_bytes,(unsigned long long)p->cache_hit_bytes,clock_ok?1u:0u);
-        sce::Ampr::Emu::kernelDebugLogf("[BWREAD_PROGRESS1] hits=%llu misses=%llu evictions=%llu resident=%llu runs=%llu blocks=%llu maxRead=%llu namedNs=%llu heldNs=%llu openNs=%llu closeNs=%llu preadNs=%llu readNs=%llu",
+        sce::Ampr::Emu::kernelDebugLogf("[BWREAD_PROGRESS1] hits=%llu misses=%llu evictions=%llu resident=%llu runs=%llu blocks=%llu maxRead=%llu namedNs=%llu heldNs=%llu openNs=%llu closeNs=%llu preadNs=%llu readNs=%llu readCpuNs=%llu preadCpuNs=%llu pollWaitNs=%llu serviceNs=%llu serviceCpuNs=%llu",
             (unsigned long long)p->cache_hits,(unsigned long long)p->cache_misses,(unsigned long long)p->cache_evictions,(unsigned long long)p->cache_resident,
             (unsigned long long)p->coalesced_runs,(unsigned long long)p->coalesced_blocks,(unsigned long long)p->largest_pread_request,
             (unsigned long long)p->named_stat.nanoseconds,(unsigned long long)p->held_stat.nanoseconds,(unsigned long long)p->open.nanoseconds,
-            (unsigned long long)p->close.nanoseconds,(unsigned long long)p->pread.nanoseconds,(unsigned long long)p->read.nanoseconds);
+            (unsigned long long)p->close.nanoseconds,(unsigned long long)p->pread.nanoseconds,(unsigned long long)p->read.nanoseconds,
+            (unsigned long long)p->read_cpu_ns,(unsigned long long)p->pread_cpu_ns,(unsigned long long)p->poll_wait_ns,
+            (unsigned long long)p->service_wall_ns,(unsigned long long)p->service_cpu_ns);
+        sce::Ampr::Emu::kernelDebugLogf("[BWREAD_PREFETCH1] gameReads=%llu gameBytes=%llu gameNs=%llu steps=%llu bytes=%llu ns=%llu rcvbuf=%llu",
+            (unsigned long long)game_stats.reads,(unsigned long long)game_stats.bytes,(unsigned long long)game_stats.ns,
+            (unsigned long long)game_stats.prefetch_steps,(unsigned long long)game_stats.prefetch_bytes,(unsigned long long)game_stats.prefetch_ns,
+            (unsigned long long)p->socket_rcvbuf);
     }
     errno=saved;
 }
@@ -364,16 +470,123 @@ int bp_runtime_match(const char *path,size_t length,uint64_t bytes,uint32_t *id)
 int64_t bp_runtime_read(uint32_t id,uint64_t at,void *out,size_t size,const std::atomic<bool> *cancel,struct bp_read_witness *witness){
     if(witness)*witness={};
     if(!bp_runtime_ready())return canceled.load()?-ECANCELED:-EIO;
-    job_cancel=cancel;
+    job_cancel=cancel;uint64_t began=monotonic_ns();
     int64_t result=!first_read.emitted&&witness?bp_source_read_observed(source,id,at,out,size,witness):bp_source_read(source,id,at,out,size);
     job_cancel=nullptr;
+    uint64_t ended=monotonic_ns();game_stats.reads++;if(ended>=began&&began)game_stats.ns+=ended-began;
+    if(result>0){
+        game_stats.bytes+=(uint64_t)result;uint64_t end=at+(uint64_t)result;
+        PrefetchStream *slot=nullptr,*victim=&prefetch_streams[0];
+        for(auto& s:prefetch_streams){if(s.active&&s.id==id){slot=&s;break;}if(!s.active||s.used<victim->used)victim=&s;}
+        if(slot&&at+kPrefetchGap>=slot->next&&at<=slot->next+kPrefetchGap){
+            if(end>slot->next)slot->next=end;if(slot->ahead<slot->next)slot->ahead=slot->next;slot->hits++;
+        }else{if(!slot)slot=victim;*slot=PrefetchStream{id,end,end,0,1,true,false};}
+        slot->used=++prefetch_clock;
+    }
     return result;
 }
+static PrefetchStream *prefetch_candidate(){
+    if(!bp_runtime_ready()||!first_read.emitted)return nullptr;
+    PrefetchStream *best=nullptr;
+    for(auto& s:prefetch_streams)if(s.active&&!s.done&&s.hits>=2&&s.ahead<s.next+kPrefetchAhead&&(!best||s.ahead-s.next<best->ahead-best->next))best=&s;
+    return best;
+}
+bool bp_runtime_prefetch_pending(){AmprLockGuard guard(primary_mutex());return prefetch_candidate()!=nullptr;}
+void bp_runtime_prefetch_step(){
+    AmprLockGuard guard(primary_mutex());
+    PrefetchStream *s=prefetch_candidate();if(!s)return;
+    uint64_t began=monotonic_ns();job_cancel=nullptr;
+    int64_t got=bp_source_read(source,s->id,s->ahead,prefetch_buffer,kPrefetchStep);
+    uint64_t ended=monotonic_ns();if(ended>=began&&began)game_stats.prefetch_ns+=ended-began;
+    game_stats.prefetch_steps++;
+    if(got>0){s->ahead+=(uint64_t)got;game_stats.prefetch_bytes+=(uint64_t)got;}else s->done=true;
+}
+uint64_t bp_runtime_now_ns(){return monotonic_ns();}
+bool bp_runtime_slicing_ready(){return bp_runtime_ready()&&first_read.emitted;}
+void bp_runtime_note_queue(uint32_t depth){
+    AmprLockGuard guard(lat_mutex());
+    if(depth>lat.depth_peak)lat.depth_peak=depth;if(depth>lat.session_depth_peak)lat.session_depth_peak=depth;
+}
+void bp_runtime_record_request(const struct bp_request_sample *s){
+    if(!s||!s->queued_ns)return;
+    AmprLockGuard guard(lat_mutex());
+    uint64_t total=s->done_ns>s->queued_ns?(s->done_ns-s->queued_ns)/1000u:0;
+    uint64_t queue=s->start_ns>s->queued_ns?(s->start_ns-s->queued_ns)/1000u:0;
+    uint64_t service=s->service_ns/1000u;
+    unsigned c=s->work_class<kLatClasses?s->work_class:1u,prio=s->priority<kLatPriorities?s->priority:kLatPriorities-1u;
+    lat_add(lat.window[c],s->bytes,total,queue,service,s->failed);lat_add(lat.session[c],s->bytes,total,queue,service,s->failed);
+    lat.prio_n[prio]++;lat.prio_slow[prio]+=total>33000;
+    lat.size_bins[log2_bin(s->bytes,kSizeBins)]++;
+    lat_file(s->id,s->bytes,c==0,total>16000,total);
+    if(!lat.last_log)lat.last_log=s->done_ns;
+    // Game exit kills the process without a worker stop, so session totals
+    // are re-emitted every sixth window instead of only at shutdown.
+    if(s->done_ns>=lat.last_log+5000000000ull){
+        lat_log_window();lat.last_log=s->done_ns;
+        if(++lat.windows%6==0)lat_report_session();
+    }
+}
 void bp_runtime_report_read(const struct bp_read_witness *witness,int64_t completed){
+    AmprLockGuard guard(primary_mutex());
     int saved=errno;char line[512];
     if(bp_first_read_format(&first_read,witness,completed,current(nullptr),line,sizeof line)>0)
         sce::Ampr::Emu::kernelDebugLogf("%s",line);
     errno=saved;
+}
+static void lane_start(uint32_t worker){
+    if(lane_status.load()!=2||!metadata_ready.load()||canceled.load()){
+        sce::Ampr::Emu::kernelDebugLogf("[BWREAD_LANE1] event=unavailable worker=%u status=%u",worker,lane_status.load());return;
+    }
+    // The game heap refuses this size; AMPR's own pool backs its worker buffers.
+    size_t granted=0;
+    lane_storage=static_cast<uint8_t*>(ampr_internal_amm_pool_alloc(kLaneCacheBytes,&granted,"bw.lane.cache",false,64u));
+    if(lane_storage&&granted<kLaneCacheBytes){(void)ampr_internal_amm_pool_free(lane_storage,"bw.lane.cache.short");lane_storage=nullptr;}
+    int result=lane_storage?bp_source_connect_with_storage(lane_source,lane_storage,kLaneCacheBytes):-ENOMEM;
+    lane_status.store(result?5u:4u);
+    sce::Ampr::Emu::kernelDebugLogf("[BWREAD_LANE1] event=connect worker=%u result=%d cacheMiB=%u",worker,result,(unsigned)(kLaneCacheBytes>>20));
+}
+static void lane_log(uint64_t now){
+    if(now<lane_stats.last_log+5000000000ull)return;
+    lane_stats.last_log=now;struct bp_source_performance p{};bp_source_performance(lane_source,&p);
+    sce::Ampr::Emu::kernelDebugLogf("[BWREAD_LANE1] reads=%llu bytes=%llu ns=%llu fallbacks=%llu payload=%llu hits=%llu misses=%llu serviceNs=%llu pollWaitNs=%llu status=%u",
+        (unsigned long long)lane_stats.reads,(unsigned long long)lane_stats.bytes,(unsigned long long)lane_stats.ns,(unsigned long long)lane_stats.fallbacks,
+        (unsigned long long)p.payload_bytes,(unsigned long long)p.cache_hits,(unsigned long long)p.cache_misses,
+        (unsigned long long)p.service_wall_ns,(unsigned long long)p.poll_wait_ns,lane_status.load());
+}
+void bp_worker_start(uint32_t worker,uint32_t workers){
+    uint32_t none=kNoWorker;
+    if(workers>1&&worker==0&&lane_owner.compare_exchange_strong(none,worker))lane_start(worker);
+    none=kNoWorker;
+    if((workers<=1||worker+1==workers)&&primary_owner.compare_exchange_strong(none,worker)){
+        AmprLockGuard guard(primary_mutex());(void)bp_worker_initialize();
+    }
+}
+int64_t bp_runtime_read_job(uint32_t worker,bool bulk,uint32_t id,uint64_t at,void *out,size_t size,const std::atomic<bool> *cancel,struct bp_read_witness *witness){
+    if(!bulk&&worker==lane_owner.load()&&lane_status.load()==4&&!canceled.load()){
+        lane_cancel=cancel;uint64_t began=monotonic_ns();
+        int64_t result=bp_source_read(lane_source,id,at,out,size);
+        lane_cancel=nullptr;uint64_t ended=monotonic_ns();
+        lane_stats.reads++;if(ended>=began&&began)lane_stats.ns+=ended-began;if(result>0)lane_stats.bytes+=(uint64_t)result;
+        if(result>=0||result==-ECANCELED){lane_log(ended);return result;}
+        // A failed lane is retired; this and later reads use the primary.
+        lane_status.store(5);lane_stats.fallbacks++;
+        sce::Ampr::Emu::kernelDebugLogf("[BWREAD_LANE1] event=retired result=%lld",(long long)result);
+    }
+    AmprLockGuard guard(primary_mutex());
+    uint32_t none=kNoWorker;
+    if(status.load()==2&&primary_owner.compare_exchange_strong(none,worker))(void)bp_worker_initialize();
+    return bp_runtime_read(id,at,out,size,cancel,witness);
+}
+void bp_worker_stop(uint32_t worker){
+    if(worker==lane_owner.load()&&lane_source){
+        unsigned state=lane_status.load();if(state==4||state==5)(void)bp_source_disconnect(lane_source);lane_status.store(6);
+    }
+    if(worker==primary_owner.load()){AmprLockGuard guard(primary_mutex());bp_worker_finish();}
+}
+int bp_lane_release(){
+    if(lane_owner.load()!=kNoWorker&&lane_status.load()==4)return -1;
+    int result=lane_source?bp_source_close(lane_source):0;lane_source=nullptr;
+    if(lane_storage)(void)ampr_internal_amm_pool_free(lane_storage,"bw.lane.cache");lane_storage=nullptr;return result;
 }
 void bp_runtime_cancel(){canceled.store(true);status.store(6);}
 int bp_runtime_release(){

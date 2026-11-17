@@ -23,7 +23,7 @@ static int post(void *v,enum bw_sm_operation op,const char *root,struct bw_sm_re
     if(op==BW_SM_SCAN){C(++f->scans==1);return f->fail_scan?-2:0;}
     C(0);return -1;
 }
-static void pause_job(void *v,unsigned ms){struct fixture *f=v;C(ms==250);f->time+=(double)ms/1000;C(f->time<1000);}
+static void pause_job(void *v,unsigned ms){struct fixture *f=v;C(ms==250);f->time+=(double)ms/1000;C(f->time<100+BW_REGISTER_WAIT_SECONDS+10);}
 static void progress(void *v,const char *message){C(v&&message&&*message);}
 static struct fixture fresh(void){return (struct fixture){.time=100,.ready=101,.cancel=-1,.caps=7};}
 static int run(struct fixture *f,struct bw_register_result *r){
@@ -36,8 +36,8 @@ int main(void){
     f=fresh();f.present=1;C(!run(&f,&r)&&!f.adds&&f.scans==1);
     f=fresh();f.ready=195;C(!run(&f,&r)&&f.time>=197&&f.adds==1); /* previously expired after 60s */
     f=fresh();f.ready=250;C(!run(&f,&r)&&f.time>=252&&f.adds==1);
-    f=fresh();f.ready=1000;C(run(&f,&r)&&!r.registered&&f.adds==1&&!strcmp(r.cause,"registration_deadline_expired"));C(strstr(r.message,"timeout")&&!strstr(r.message,"manual source"));
-    f=fresh();f.ready=279;C(run(&f,&r)&&!strcmp(r.cause,"registration_deadline_expired")); /* no 2s retained window */
+    f=fresh();f.ready=100+BW_REGISTER_WAIT_SECONDS+50;C(run(&f,&r)&&!r.registered&&f.adds==1&&!strcmp(r.cause,"registration_deadline_expired"));C(strstr(r.message,"timeout")&&!strstr(r.message,"manual source"));
+    f=fresh();f.ready=100+BW_REGISTER_WAIT_SECONDS-1;C(run(&f,&r)&&!strcmp(r.cause,"registration_deadline_expired")); /* no 2s retained window */
     f=fresh();f.caps=15;C(!run(&f,&r)&&r.capabilities==15);
     f=fresh();f.caps=3;C(run(&f,&r)&&!f.adds&&!f.scans&&!strcmp(r.cause,"registration_api_incompatible"));
     f=fresh();f.fail_list=1;C(run(&f,&r)&&!f.adds&&r.last_post_result==-2&&!strcmp(r.cause,"registration_manual_observation_failed"));

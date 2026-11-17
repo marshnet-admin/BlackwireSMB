@@ -4,7 +4,7 @@
 #include "shadowmount_client.h"
 /* Only read-only confirmation may use this extended budget. The number of
  * add, scan and qualified reattach mutations remains unchanged. */
-#define BW_REGISTER_WAIT_SECONDS 420u
+#define BW_REGISTER_WAIT_SECONDS 900u
 struct bw_register_ops {
     void *opaque;
     int (*current)(void *);

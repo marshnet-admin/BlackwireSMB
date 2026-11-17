@@ -66,7 +66,7 @@ static int np_write(void *opaque,const void *bytes,size_t size){
     do{
         if(cp_refresh(w->plan)||!v2_directory_current(&w->plan->cfg,w->root,w->parent,w->relative))return -1;
         if(at==size)break; /* An empty consumer piece still checks its scope. */
-        size_t want=size-at<65536?size-at:65536;
+        size_t want=size-at<1048576?size-at:1048576;
         ssize_t n=BW_COPY_WRITE(w->fd,(const uint8_t *)bytes+at,want);
         if(n<0&&errno==EINTR)continue;
         if(n<=0||(size_t)n>want)return -1;

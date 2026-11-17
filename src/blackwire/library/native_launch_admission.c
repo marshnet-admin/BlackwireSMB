@@ -160,7 +160,7 @@ static int na_open(struct bw_native_launch_admission **out,const char *base,
     uint8_t *record=NULL;size_t size=0;char (*paths)[2048]=calloc(4,2048);struct cp_plan *plan=calloc(1,sizeof *plan);
     if(p)for(unsigned i=0;i<4;i++)p->directories[i]=-1;
     if(!p||!paths||!plan)goto done;
-    p->identity=*identity;p->guard=guard;p->opaque=opaque;p->deadline=cp_now()+300.0;p->purpose=purpose;
+    p->identity=*identity;p->guard=guard;p->opaque=opaque;p->deadline=cp_now()+1200.0;p->purpose=purpose;
     if(na_guard(p)||ns_paths(base,&identity->binding,paths[2])||ns_provider_json(identity,&json))goto done;
     int a=snprintf(paths[0],sizeof paths[0],"%s",base),b=snprintf(paths[1],sizeof paths[1],"%s/native-prepared",base),
         c=snprintf(paths[3],sizeof paths[3],"%s/games/%s",base,identity->binding.game);

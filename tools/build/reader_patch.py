@@ -14,12 +14,12 @@ def apply(root:Path):
     s=replace(s,'    return amprInstallLibkernelHooks();',
         '    int result=bp_prepare_originals_and_metadata();\n    if(result==0){result=amprInstallLibkernelHooks();bp_init_report(BP_INIT_INSTALL,result);}\n    if(result!=0){int released=bp_release_unpatched_metadata();bp_init_report(BP_INIT_RELEASE,released);(void)bp_home_startup_failure(released);}\n    return result;')
     s=replace(s,'int module_stop(size_t args, const void* argp) {','int module_stop(size_t args, const void* argp) {\n    bp_runtime_cancel();')
-    s=replace(s,'    return amprUninstallLibkernelHooks();','    if (bp_runtime_release() != 0) return -1;\n    return amprUninstallLibkernelHooks();')
+    s=replace(s,'    return amprUninstallLibkernelHooks();','    if (bp_lane_release() != 0 || bp_runtime_release() != 0) return -1;\n    return amprUninstallLibkernelHooks();')
     exports.write_text(s)
     crt=root/'ps5/crt/crtbeginS.c';s=crt.read_text();s=replace(s,'    if (__cxa_finalize) {','    if (result != 0) return result;\n    if (__cxa_finalize) {');crt.write_text(s)
     pack=root/'src/ampr_emu_pack.cpp';s=pack.read_text();at=s.index('#include ');s=s[:at]+'#include "runtime.h"\n'+s[at:]
     s=replace(s,'struct VirtualFdSlot {\n','struct VirtualFdSlot {\n    bool bpRemote{}; uint32_t bpId{}; uint64_t bpSize{}; int64_t bpMtime{};\n')
-    s=replace(s,'struct VirtualAioSlot {\n','struct VirtualAioSlot {\n    bool bpRemote{}; uint32_t bpId{};\n')
+    s=replace(s,'struct VirtualAioSlot {\n','struct VirtualAioSlot {\n    bool bpRemote{}; uint32_t bpId{};\n    uint64_t bpQueuedNs{}, bpStartNs{}, bpServiceNs{}; size_t bpDone{};\n')
     s=replace(s,'    slot.request = {};\n    slot.fileId = 0;','    slot.request = {};\n    slot.fileId = 0; slot.bpRemote=false; slot.bpId=0;')
     s=replace(s,'            slot.fileId = fileId;\n','            slot.fileId = fileId; slot.bpRemote=false; slot.bpId=0; slot.bpSize=0; slot.bpMtime=0;\n')
     open_at='''    if (!handled || fileId == 0 || !entry.path) {
@@ -50,18 +50,36 @@ def apply(root:Path):
         fill_synthetic_stat(stat, false, file.logicalSize, file.mtime,'''
     s=replace(s,stat_at,'''        if(slot.bpRemote){fill_synthetic_stat(stat,false,slot.bpSize,slot.bpMtime,(uint64_t)slot.bpId+1);return 0;}
 '''+stat_at)
-    s=replace(s,'            aio.fileId = fdSlot.fileId;','            aio.fileId = fdSlot.fileId; aio.bpRemote=fdSlot.bpRemote; aio.bpId=fdSlot.bpId;')
+    s=replace(s,'            aio.fileId = fdSlot.fileId;','            aio.fileId = fdSlot.fileId; aio.bpRemote=fdSlot.bpRemote; aio.bpId=fdSlot.bpId;\n            aio.bpQueuedNs=fdSlot.bpRemote?bp_runtime_now_ns():0; aio.bpStartNs=0; aio.bpServiceNs=0; aio.bpDone=0;')
     s=replace(s,'            if (!state.header || !state.files || aio.fileId == 0 ||\n                aio.fileId > state.header->fileCount) {',
         '            if (!aio.bpRemote && (!state.header || !state.files || aio.fileId == 0 ||\n                aio.fileId > state.header->fileCount)) {')
-    s=replace(s,'classify_work(state.files[aio.fileId - 1u], aio.request);','aio.bpRemote ? PackWorkClass::Balanced : classify_work(state.files[aio.fileId - 1u], aio.request);')
+    # Streamed reads use upstream's size classes ahead of process-FIFO, so a
+    # small read never queues behind large streaming reads of the same priority.
+    s=replace(s,'static uint32_t work_class_index(PackWorkClass workClass) {',
+        'static PackWorkClass bp_remote_class(uint64_t bytes) {\n    if (bytes <= AMPR_EMU_PACK_LATENCY_READ_MAX_BYTES) return PackWorkClass::Latency;\n    return bytes >= AMPR_EMU_PACK_BULK_READ_MIN_BYTES ? PackWorkClass::Bulk : PackWorkClass::Balanced;\n}\n\nstatic uint32_t work_class_index(PackWorkClass workClass) {')
+    s=replace(s,'            aio.workClass =\n#if AMPR_EMU_PACK_PROCESS_AIO_STRICT_FIFO\n',
+        '            aio.workClass = aio.bpRemote ? bp_remote_class(aio.request.nbyte) :\n#if AMPR_EMU_PACK_PROCESS_AIO_STRICT_FIFO\n')
     name='static bool try_process_virtual_read_cache_only('
     old=function(s,name);pos=old.index('{')+1;new=old[:pos]+'\n    if(job.bpRemote)return false;\n'+old[pos:];s=replace(s,old,new)
     name='static void* pack_worker_entry('
-    old=function(s,name);new=replace(old,'    PackState& state = pack_state();','    (void)bp_worker_initialize();\n    PackState& state = pack_state();')
+    old=function(s,name);new=replace(old,'    PackState& state = pack_state();','    PackState& state = pack_state();\n    bp_worker_start(worker->index, state.requestedWorkers);')
     new=replace(new,'    (void)scePthreadSetprio(scePthreadSelf(), AMPR_EMU_PACK_WORKER_PRIORITY);',
         '    const int bpPriority=bp_worker_priority(AMPR_EMU_PACK_WORKER_PRIORITY);\n    const int bpPriorityRc=scePthreadSetprio(scePthreadSelf(), bpPriority);\n    bp_worker_priority_report(AMPR_EMU_PACK_WORKER_PRIORITY,bpPriority,bpPriorityRc);')
-    new=replace(new,'                return nullptr;','                lock.unlock(); bp_worker_finish(); return nullptr;')
-    new=replace(new,'        int64_t returnValue = 0;','        bp_read_witness bpWitness{}; bool bpPublished=false;\n        int64_t returnValue = 0;')
+    # Idle read-ahead: one bounded step at a time, outside the pack lock, only
+    # while this sole worker has no queued, stop or fd-wake work.
+    new=replace(new,'            state.queueCv.wait(lock, [&] {',
+        '''            while (!worker_is_latency_reserved_locked(state, worker->index) &&
+                   !(state.workerStopRequested.load(std::memory_order_acquire) ||
+                     wake_fd_waiters_locked(state) ||
+                     queue_has_work_for_worker_locked(state, worker->index)) &&
+                   bp_runtime_prefetch_pending()) {
+                lock.unlock(); bp_runtime_prefetch_step(); lock.lock();
+            }
+            state.queueCv.wait(lock, [&] {''')
+    new=replace(new,'                return nullptr;','                lock.unlock(); bp_worker_stop(worker->index); return nullptr;')
+    new=replace(new,'            job.phase = VirtualAioPhase::Running;',
+        '            job.phase = VirtualAioPhase::Running;\n            bp_runtime_note_queue(state.queueDepth[0] + state.queueDepth[1] + state.queueDepth[2]);')
+    new=replace(new,'        int64_t returnValue = 0;','        bp_read_witness bpWitness{}; bool bpPublished=false; bool bpRequeue=false; struct bp_request_sample bpSample{};\n        int64_t returnValue = 0;')
     new=replace(new,'        const PipelineStep step = advance_virtual_read_aio(\n            job, *worker, *pipeline, &returnValue, &pipelineError);',
         '''        PipelineStep step;
         if(job.bpRemote){
@@ -70,12 +88,24 @@ def apply(root:Path):
             }else if(job.request.offset<0 || !job.request.result){
                 pipelineError=SCE_KERNEL_ERROR_EINVAL;step=PipelineStep::Failed;
             }else{
-                int64_t result=bp_runtime_read(job.bpId,(uint64_t)job.request.offset,job.request.buf,job.request.nbyte,&job.cancelRequested,&bpWitness);
+                // Large reads run as bounded slices and requeue behind waiting
+                // smaller work; the first published read stays unsliced.
+                const uint64_t bpBegin=bp_runtime_now_ns();if(!job.bpStartNs)job.bpStartNs=bpBegin;
+                const size_t bpLeft=job.request.nbyte-job.bpDone;
+                const size_t bpSlice=bp_runtime_slicing_ready()&&bpLeft>BP_RUNTIME_SLICE_BYTES?BP_RUNTIME_SLICE_BYTES:bpLeft;
+                int64_t result=bp_runtime_read_job(worker->index,job.workClass==PackWorkClass::Bulk,job.bpId,(uint64_t)job.request.offset+job.bpDone,(uint8_t*)job.request.buf+job.bpDone,bpSlice,&job.cancelRequested,&bpWitness);
+                const uint64_t bpEnd=bp_runtime_now_ns();if(bpEnd>=bpBegin)job.bpServiceNs+=bpEnd-bpBegin;
                 if(job.cancelRequested.load() || state.workerStopRequested.load())result=-ECANCELED;
                 if(result<0){pipelineError=ampr_sce_errno_from_posix((int)-result);step=PipelineStep::Failed;}
-                else{returnValue=result;step=PipelineStep::Complete;}
+                else{
+                    job.bpDone+=(size_t)result;
+                    if((size_t)result<bpSlice||job.bpDone>=job.request.nbyte){returnValue=(int64_t)job.bpDone;step=PipelineStep::Complete;}
+                    else{bpRequeue=true;step=PipelineStep::Ready;}
+                }
             }
+            if(!bpRequeue)bpSample=bp_request_sample{job.bpId,(uint64_t)job.request.nbyte,job.bpQueuedNs,job.bpStartNs,job.bpServiceNs,bp_runtime_now_ns(),job.priority,(uint8_t)job.workClass,step==PipelineStep::Failed};
         }else step=advance_virtual_read_aio(job,*worker,*pipeline,&returnValue,&pipelineError);''')
+    new=replace(new,'            switch (step) {','            if (bpRequeue) {\n                queue_push_locked(state, index, pack_telemetry_usecs());\n                notifyWorkers = true;\n            } else switch (step) {')
     new=replace(new,'''                    complete_virtual_job(
                         state, index, returnValue,
                         SCE_KERNEL_AIO_STATE_COMPLETED);
@@ -87,7 +117,7 @@ def apply(root:Path):
                         !job.cancelRequested.load() && !state.workerStopRequested.load();
                     // BWREAD_COMPLETION_WITNESS_END
                     break;''')
-    new=replace(new,'        if (notifyWorkers) state.queueCv.notify_all();','        if (notifyWorkers) state.queueCv.notify_all();\n        if(bpPublished)bp_runtime_report_read(&bpWitness,returnValue);')
+    new=replace(new,'        if (notifyWorkers) state.queueCv.notify_all();','        if (notifyWorkers) state.queueCv.notify_all();\n        if(bpPublished)bp_runtime_report_read(&bpWitness,returnValue);\n        if(bpSample.queued_ns)bp_runtime_record_request(&bpSample);')
     s=replace(s,old,new)
     pack.write_text(s)
     index=root/'src/ampr_emu_index.cpp';s=index.read_text();at=s.index('#include ');s=s[:at]+'#include "runtime.h"\n'+s[at:]

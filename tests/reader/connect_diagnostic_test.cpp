@@ -31,9 +31,8 @@ static void smb2_set_timeout(Smb*,int n){CHECK(n==10);options++;}
 static void smb2_set_user(Smb*,const char*){options++;}
 static void smb2_set_password(Smb*,const char*){options++;}
 constexpr unsigned SMB2_NEGOTIATE_SIGNING_ENABLED=1;
-constexpr unsigned SMB2_NEGOTIATE_SIGNING_REQUIRED=2;
-static void smb2_set_sign(Smb*,int n){CHECK(n==1);options++;}
-static void smb2_set_security_mode(Smb*,unsigned n){CHECK(n==(SMB2_NEGOTIATE_SIGNING_ENABLED|SMB2_NEGOTIATE_SIGNING_REQUIRED));options++;}
+static void smb2_set_sign(Smb*,int n){CHECK(n==0);options++;}
+static void smb2_set_security_mode(Smb*,unsigned n){CHECK(n==SMB2_NEGOTIATE_SIGNING_ENABLED);options++;}
 static int smb2_connect_share(Smb*,const char*,const char*,const char*){shares++;errno=ECONNREFUSED;return share_result;}
 static int smb2_get_nterror(Smb*){ntreads++;CHECK(errno==ECONNREFUSED);return ntstatus;}
 static void bw_share_clear(Config *p){clears++;std::memset(p,0,sizeof *p);errno=ERANGE;}

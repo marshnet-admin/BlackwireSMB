@@ -47,8 +47,8 @@ int main(int argc,char **argv){
     CHECK(bw_pfsc_read(decoder,0,out,logical)==BW_PFSC_IO);image.fail_payload=0;free(decoder);
     uint64_t second=le64(image.bytes+0x410);put64(image.bytes+0x410,le64(image.bytes+0x408));
     decoder=open_image(&image,logical);CHECK(bw_pfsc_read(decoder,0,out,logical)==BW_PFSC_FORMAT);free(decoder);put64(image.bytes+0x410,second);
-    if(full_calls==1){
-        uint64_t end=le64(image.bytes+0x408);CHECK(end-image.data_start<BW_PFSC_BLOCK);image.bytes[end-1]^=1;
+    if(le64(image.bytes+0x408)-image.data_start<BW_PFSC_BLOCK){
+        uint64_t end=le64(image.bytes+0x408);image.bytes[end-1]^=1;
         decoder=open_image(&image,logical);CHECK(bw_pfsc_read(decoder,0,out,logical)==BW_PFSC_CODEC);free(decoder);image.bytes[end-1]^=1;
     }
     printf("{\"passed\":true,\"checks\":%u,\"fullReadPayloadCalls\":%u,\"logicalBytes\":%zu,\"boundedFetches\":true}\n",checks,full_calls,logical);

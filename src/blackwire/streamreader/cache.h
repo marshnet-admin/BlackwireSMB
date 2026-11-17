@@ -18,7 +18,7 @@ struct bw_cache {
     struct bw_cache_entry *_entries;
     uint8_t *_storage;
     size_t _newest, _oldest;
-    uint32_t _buckets[BW_CACHE_BUCKETS], _free;
+    uint32_t _buckets[BW_CACHE_BUCKETS], _free, _slots;
 
     uint64_t hits, misses, evictions, loaded_bytes;
     size_t allocation_bytes; /* Tracked payload storage + fixed entry metadata. */
@@ -29,7 +29,8 @@ struct bw_cache {
 /* Single-threaded; serialize access externally if shared. Initialize once,
  * then destroy before reinitializing. No allocations occur during get(). */
 int bw_cache_init(struct bw_cache *cache);
-/* Exact fixed-size caller-owned payload; no payload allocation or clearing.
+/* Caller-owned payload of 1..BW_CACHE_SLOTS whole blocks (BW_CACHE_BYTES for
+ * the full cache); no payload allocation or clearing.
  * Storage must be valid, exclusive, disjoint from cache, and remain alive
  * through destroy and all loader calls. The entry table still uses calloc.
  * Return0 success, -1 invalid storage, -2 entry-table allocation failed.

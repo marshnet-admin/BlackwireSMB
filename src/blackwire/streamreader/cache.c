@@ -15,7 +15,7 @@ struct bw_cache_entry {
 
 static void initialize_free(struct bw_cache *cache){
     cache->_free=1;
-    for(uint32_t i=0;i<BW_CACHE_SLOTS;i++)cache->_entries[i].free_next=i+1u<BW_CACHE_SLOTS?i+2u:0;
+    for(uint32_t i=0;i<cache->_slots;i++)cache->_entries[i].free_next=i+1u<cache->_slots?i+2u:0;
 }
 static size_t bucket(uint32_t pak,uint64_t block){
     uint64_t value=block^((uint64_t)pak*UINT64_C(0x9e3779b97f4a7c15));
@@ -48,6 +48,7 @@ int bw_cache_init(struct bw_cache *cache) {
         bw_cache_destroy(cache);
         return -1;
     }
+    cache->_slots = BW_CACHE_SLOTS;
     cache->allocation_bytes = (size_t)BW_CACHE_SLOTS *
                               (BW_CACHE_BLOCK + sizeof *cache->_entries);
     initialize_free(cache);
@@ -58,16 +59,18 @@ int bw_cache_init_with_storage(struct bw_cache *cache,void *storage,size_t bytes
     if (!cache) return -1;
     memset(cache,0,sizeof *cache);
     cache->_newest=cache->_oldest=NO_SLOT;
-    if (!storage || bytes!=BW_CACHE_BYTES ||
-        (uintptr_t)storage>UINTPTR_MAX-(BW_CACHE_BYTES-1u)) return -1;
-    cache->_entries=calloc(BW_CACHE_SLOTS,sizeof *cache->_entries);
+    if (!storage || !bytes || bytes>BW_CACHE_BYTES || bytes%BW_CACHE_BLOCK ||
+        (uintptr_t)storage>UINTPTR_MAX-(bytes-1u)) return -1;
+    uint32_t slots=(uint32_t)(bytes/BW_CACHE_BLOCK);
+    cache->_entries=calloc(slots,sizeof *cache->_entries);
     if (!cache->_entries) {
         bw_cache_destroy(cache);
         return -2;
     }
     cache->_storage=storage;
     cache->_external_storage=1;
-    cache->allocation_bytes=(size_t)BW_CACHE_SLOTS *
+    cache->_slots=slots;
+    cache->allocation_bytes=(size_t)slots *
                             (BW_CACHE_BLOCK + sizeof *cache->_entries);
     initialize_free(cache);
     return 0;

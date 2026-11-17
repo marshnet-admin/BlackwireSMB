@@ -38,6 +38,7 @@ struct smb2_context {struct smb2fh *handles;unsigned char *pending;int signing;u
 #define CHECK(x) do{checks++;if(!(x)){fprintf(stderr,"check failed %s:%d: %s\n",__FILE__,__LINE__,#x);exit(1);}}while(0)
 static unsigned char body(unsigned id,uint64_t at){return (unsigned char)((at*17+id*29)%251);}
 int __wrap_clock_gettime(clockid_t clock,struct timespec *stamp){
+    if(clock==CLOCK_THREAD_CPUTIME_ID){CHECK(stamp);stamp->tv_sec=0;stamp->tv_nsec=0;return 0;}
     CHECK(clock==CLOCK_MONOTONIC&&stamp);errno=ERANGE;if(clock_fault)return -1;
     fake_ns=clock_reverse?fake_ns-1000:fake_ns+1000;
     stamp->tv_sec=(time_t)(fake_ns/1000000000u);stamp->tv_nsec=(long)(fake_ns%1000000000u);return 0;
@@ -53,9 +54,9 @@ void smb2_destroy_context(struct smb2_context *c){
 void smb2_set_timeout(struct smb2_context *c,int n){CHECK(c&&n==10);}
 void smb2_set_user(struct smb2_context *c,const char *u){CHECK(c&&u&&!strcmp(u,"fixture"));}
 void smb2_set_password(struct smb2_context *c,const char *p){CHECK(c&&p&&!strcmp(p,""));}
-void smb2_set_sign(struct smb2_context *c,int required){CHECK(c&&required==1);c->signing=required;}
-void smb2_set_security_mode(struct smb2_context *c,uint16_t m){CHECK(c&&m==(SMB2_NEGOTIATE_SIGNING_ENABLED|SMB2_NEGOTIATE_SIGNING_REQUIRED));c->security_mode=m;}
-int smb2_connect_share(struct smb2_context *c,const char *s,const char *h,const char *u){connects++;CHECK(c&&c->signing==1&&c->security_mode==(SMB2_NEGOTIATE_SIGNING_ENABLED|SMB2_NEGOTIATE_SIGNING_REQUIRED)&&!strcmp(s,"192.0.2.1")&&!strcmp(h,"fixture")&&!strcmp(u,"fixture"));return 0;}
+void smb2_set_sign(struct smb2_context *c,int required){CHECK(c&&required==0);c->signing=required;}
+void smb2_set_security_mode(struct smb2_context *c,uint16_t m){CHECK(c&&m==SMB2_NEGOTIATE_SIGNING_ENABLED);c->security_mode=m;}
+int smb2_connect_share(struct smb2_context *c,const char *s,const char *h,const char *u){connects++;CHECK(c&&c->signing==0&&c->security_mode==SMB2_NEGOTIATE_SIGNING_ENABLED&&!strcmp(s,"192.0.2.1")&&!strcmp(h,"fixture")&&!strcmp(u,"fixture"));return 0;}
 int smb2_get_nterror(struct smb2_context *c){CHECK(c);return 0;}
 uint32_t smb2_get_max_read_size(struct smb2_context *c){CHECK(c);return negotiated_limit;}
 static int path_id(const char *p){unsigned id;char tail;return sscanf(p,"Fixture Title/stream%02u.pak%c",&id,&tail)==1&&id<18?(int)id:-1;}
@@ -113,6 +114,7 @@ int smb2_pread(struct smb2_context *c,struct smb2fh *h,uint8_t *out,uint32_t cou
     if(count>short_limit)count=short_limit;sample->returned=count;for(uint32_t i=0;i<count;i++)out[i]=body(h->id,at+i);
     if(change_after_read)changed=1;if(cancel_after_read)canceled=1;return (int)count;
 }
+int smb2_pread_async(struct smb2_context *c,struct smb2fh *fh,uint8_t *out,uint32_t count,uint64_t at,smb2_command_cb cb,void *opaque){int raw=smb2_pread(c,fh,out,count,at);cb(c,raw,NULL,opaque);return 0;}
 static int guard(void *p){CHECK(p==&canceled);return canceled;}
 static void put32(unsigned char *p,uint32_t n){for(unsigned i=0;i<4;i++)p[i]=(unsigned char)(n>>(i*8));}
 static void put64(unsigned char *p,uint64_t n){for(unsigned i=0;i<8;i++)p[i]=(unsigned char)(n>>(i*8));}
