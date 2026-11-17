@@ -5,6 +5,7 @@
 #include "source_param.h"
 #include "source_profile.h"
 #include "source_smb.h"
+#include "send_diagnostic.h"
 #include "../streamreader/copy_sha256.h"
 #include <stdlib.h>
 #include <string.h>
@@ -46,19 +47,21 @@ static int add(void *opaque,const char *path,const struct bw_pfs_inode *node) {
     struct scanning *p=opaque;
     if (p->owner->current(p->owner->current_opaque)) {p->error=BW_COMPRESSED_DATA_CANCELLED;return -1;}
     size_t length=strnlen(path,BW_MANIFEST_MAX_PATH+1u);
-    if (bw_manifest_validate_path(path,length)) {p->error=BW_PFS_PATH;return -1;}
+    if (bw_manifest_validate_path(path,length)) {p->error=BW_PFS_PATH;bw_send_log("prepare-scan-refused","reason=invalid_path path=%.300s",path);return -1;}
     if (bw_source_excluded(path)) return 0;
     int directory=(node->mode&0xf000u)==0x4000u;
-    if(bw_source_plan_node(p->plan,path,directory)){p->error=BW_COMPRESSED_DATA_PLAN;return -1;}
+    if(bw_source_plan_node(p->plan,path,directory)){p->error=BW_COMPRESSED_DATA_PLAN;
+        bw_send_log("prepare-scan-refused","reason=%s path=%.300s",p->plan->error?p->plan->error:"plan_node",path);return -1;}
     if(directory)return 0;
-    if (node->flags&1u) {p->error=BW_PFS_UNSUPPORTED;return -1;}
+    if (node->flags&1u) {p->error=BW_PFS_UNSUPPORTED;bw_send_log("prepare-scan-refused","reason=unsupported_inode path=%.300s",path);return -1;}
     length++;
     if (p->count==BW_COMPRESSED_DATA_MAX_FILES ||
         length>BW_COMPRESSED_DATA_MAX_PATH_BYTES-p->path_bytes) {
-        p->error=BW_COMPRESSED_DATA_LIMIT;return -1;
+        p->error=BW_COMPRESSED_DATA_LIMIT;bw_send_log("prepare-scan-refused","reason=file_or_path_limit files=%u path=%.300s",p->count,path);return -1;
     }
     if (bw_source_plan_add(p->plan,path,node->logical_size,p->owner->image->admitted.smb2_mtime)) {
-        p->error=BW_COMPRESSED_DATA_PLAN;return -1;
+        p->error=BW_COMPRESSED_DATA_PLAN;
+        bw_send_log("prepare-scan-refused","reason=%s path=%.300s",p->plan->error?p->plan->error:"plan_add",path);return -1;
     }
     p->count++;p->path_bytes+=length;return 0;
 }
@@ -176,6 +179,7 @@ int bw_compressed_data_prepare_policy(struct bw_compressed_data *p,struct bw_con
     cp_sha_bytes(p->digests,p->digest_size,p->digests_sha256);
     result=intact(p);if (!result) p->ready=1;
 done:
+    if (result) bw_send_log("prepare-scan-failure","result=%d plan_error=%s container_kind=%d",result,plan.error?plan.error:"",image->container.kind);
     bw_source_plan_destroy(&plan);p->busy=0;
     if (result) {fail(p,result);release(p);}
     return result;

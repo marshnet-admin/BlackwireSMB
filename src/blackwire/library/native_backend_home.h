@@ -7,6 +7,11 @@
 #include <math.h>
 #include "launch_timing.h"
 #include "native_projection_handoff.h"
+#include "preload_handoff.h"
+#include "reader_projection.h"
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 struct home_worker {
     struct bw_native_backend *backend;
@@ -271,6 +276,31 @@ done:
  * creates a replacement/alias application. Already-Ready games also use normal
  * Play's existing bounded upgrade before their first direct dashboard start. */
 struct home_prepare {struct bw_native_backend *p;struct bw_provider_binding identity;struct bw_native_prepared prepared;struct bw_reader_selection selection;struct bw_native_launch_admission *startup;uint64_t generation;uint32_t revision;double deadline;unsigned startup_invalid;};
+/* A launch hands the reader its private inputs in fakelib2 and removes them
+ * after the game exits; killing the resident in between leaves them behind.
+ * Setup runs only under the idle prepare authority, so no reader can still
+ * need them: remove exactly those three names when they are plain files. */
+/* Path-based lstat/unlink: the libc *at wrappers don't report ENOENT reliably
+ * on the PS5 (the copy code uses raw syscalls for them instead). */
+static int home_remove_stale_handoff(const char *root){
+    static const char *const names[]={BW_PRELOAD_HANDOFF_SELECTION,BW_PRELOAD_HANDOFF_SHARE,BW_PRELOAD_HANDOFF_PROJECTION};
+    char folder[BW_NRC_PATH_BYTES],path[BW_NRC_PATH_BYTES+64];struct stat dir;
+    int n=snprintf(folder,sizeof folder,"%s/fakelib2",root);if(n<0||(size_t)n>=sizeof folder)return -1;
+    if(lstat(folder,&dir)){int missing=errno==ENOENT;bw_send_log("stale-handoff-check","folder=absent errno=%d",errno);return missing?0:-1;}
+    if(!S_ISDIR(dir.st_mode)){bw_send_log("stale-handoff-refused","name=fakelib2 mode=%o",(unsigned)dir.st_mode);return -1;}
+    int bad=0,removed=0;
+    for(unsigned i=0;!bad&&i<sizeof names/sizeof names[0];i++){
+        n=snprintf(path,sizeof path,"%s/%s",folder,names[i]);if(n<0||(size_t)n>=sizeof path){bad=1;break;}
+        struct stat st;if(lstat(path,&st)){if(errno!=ENOENT){bw_send_log("stale-handoff-refused","name=%s lstat_errno=%d",names[i],errno);bad=1;}continue;}
+        off_t limit=i==2?(off_t)BW_READER_PROJECTION_LIMIT:(off_t)BW_READER_SELECTION_BYTES;
+        if(!S_ISREG(st.st_mode)||st.st_nlink!=1||st.st_dev!=dir.st_dev||st.st_size<0||st.st_size>limit){
+            bw_send_log("stale-handoff-refused","name=%s mode=%o links=%u size=%lld",names[i],(unsigned)st.st_mode,(unsigned)st.st_nlink,(long long)st.st_size);bad=1;continue;}
+        if(unlink(path)){bw_send_log("stale-handoff-refused","name=%s unlink_errno=%d",names[i],errno);bad=1;continue;}
+        removed++;bw_send_log("stale-handoff-removed","name=%s uid=%u size=%lld",names[i],(unsigned)st.st_uid,(long long)st.st_size);
+    }
+    if(removed){int fd=open(folder,O_RDONLY|O_DIRECTORY);if(fd<0||fsync(fd))bad=1;if(fd>=0)close(fd);}
+    return bad?-1:0;
+}
 static int home_prepare_lease(void *opaque){
     struct home_prepare *h=opaque;struct bw_native_backend *p=h->p;double t=now();if(t<0||t>=h->deadline)return -1;
     pthread_mutex_lock(&p->lock);int bad=!p->active||p->worker_kind!=WORK_PREPARE||p->control_release_unknown||p->generation!=h->generation||p->settings_revision!=h->revision||p->preparation_changed||
@@ -325,6 +355,8 @@ static int home_prepare_provision(struct bw_native_backend *p,const struct bw_na
        (step_result=projected?bw_native_launch_admission_companions(h.startup,&companions):bw_native_launch_admission_source_ampr(h.startup,&source_ampr))||
        (step_result=home_prepare_control(&h))){
         home_prepare_first_failure(&first,6,"source-generation",failure?failure:"sealed source module evidence unavailable",step_result,errno);goto done;}
+    if((step_result=home_remove_stale_handoff(root))||(step_result=home_prepare_control(&h))){
+        home_prepare_first_failure(&first,7,"stale-launch-inputs","leftover launch inputs could not be removed",step_result,errno);goto done;}
     bw_send_log("setup-step","game=%s step=7",prepared->game);
     if((step_result=projected?bw_preload_bundle_upgrade_projection_controlled(&upgrade,&split,companions,&bundled):bw_preload_bundle_upgrade_source_controlled(&upgrade,&split,source_ampr,&bundled))){unknown|=bundled.release_unknown;
         home_prepare_first_failure(&first,7,bundled.stage?bundled.stage:"reader-bundle",bundled.reason?bundled.reason:"reader bundle refused",step_result,bundled.system_error);goto done;}

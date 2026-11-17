@@ -112,7 +112,7 @@ int bw_source_plan_node(struct bw_source_plan *p,const char *path,int directory)
 static uint32_t classify(const char *path,uint64_t size,int *bootstrap) {
     static const char *const modules[]={".self",".prx",".sprx",".elf"};
     static const char *const sidecars[]={".args",".ini",".cfg",".json",".xml",".utoc",".toc",".sig",".rds",".locres",".locmeta",".uproject",".uplugin"};
-    static const char *const archives[]={".pak",".ucas",".cas",".wad",".texpack",".audiopack",".lodpack",".fdata",".file",".xxx",".psf",".bank",".bk2",".bik",".mp4",".wem",".wav",".ogg"};
+    static const char *const archives[]={".pak",".ucas",".cas",".wad",".texpack",".audiopack",".lodpack",".fdata",".file",".xxx",".psf",".bank",".bk2",".bik",".mp4",".wem",".wav",".ogg",".forge"};
     const char *base=strrchr(path,'/');base=base?base+1:path;
     const char *dot=strrchr(base,'.');char extension[256];extension[0]=0;
     if(dot&&dot!=base&&dot[1])lower_token(extension,dot,strlen(dot));
